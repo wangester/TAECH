@@ -6,20 +6,22 @@ module TAECH_IO
   real(kind=8), parameter, public :: pi = 3.141592653589793238462643383279D0
   complex(kind=8), parameter, public :: imagj = (0.0D0,1.0D0) 
 
-  public :: Deltam, eps, eta, p
+  public :: Deltam, eps, eta, deltap
   public :: t0, tend, dt, tsave
   public :: modes, smax, ds
-  public :: sbnd, cln2
+  public :: v1, v0
+  public :: sbnd, cln1, cln2
   
   public :: load_cfg
   public :: get_input, save_output
 
-  real(kind=8) :: Deltam, eps, eta, p
+  real(kind=8) :: Deltam, eps, eta, deltap
   integer :: t0, tend, tsave     ! unit in time step
   real(kind=8) :: dt
   integer :: modes
   real(kind=8) :: smax, ds
-  real(kind=8) :: sbnd, cln2
+  real(kind=8) :: v1, v0
+  real(kind=8) :: sbnd, cln1, cln2
 
   character(len=9) :: real_pattern = "ES50.30E5"  
   character(len=24) :: complex_pattern = "ES50.30E5, 1X, ES50.30E5"
@@ -44,9 +46,9 @@ contains
   subroutine load_cfg(filename)
     implicit none
     character(len=*) :: filename
-    namelist /parameters/ Deltam, eps, eta, p, &
+    namelist /parameters/ Deltam, eps, eta, deltap, &
          modes, smax, ds, t0, tend, dt, tsave, &
-         sbnd, cln2
+         v1, v0, sbnd, cln1, cln2
     logical :: is_file_alive
     inquire(file=trim(filename), exist=is_file_alive)
     if (.not. is_file_alive) then
@@ -183,13 +185,7 @@ contains
     real(kind=8) :: array1d(row_of_array1d)
     logical :: append
     integer :: i
-    logical :: is_file_alive
     if (append) then
-       inquire(file=trim(filename), exist=is_file_alive)
-       if (.not. is_file_alive) then
-          write(*,*) trim(filename), " doesn't exist! (filename?)"
-          stop
-       end if
        open(unit=20, file=trim(filename), action='write', position='append')
        output_pattern = format_pattern("real", 1)
        do i = 1, row_of_array1d
@@ -197,7 +193,7 @@ contains
        end do
        close(unit=20)
     else
-       open(unit=20, file=trim(filename), action='write')
+       open(unit=20, file=trim(filename), action='write', status='unknown')
        output_pattern = format_pattern("real", 1)
        do i = 1, row_of_array1d
           write(20, trim(output_pattern)) array1d(i)
@@ -215,13 +211,7 @@ contains
     real(kind=8) :: array2d(row_of_array2d, col_of_array2d)
     logical :: append
     integer :: i, j
-    logical :: is_file_alive
     if (append) then
-       inquire(file=trim(filename), exist=is_file_alive)
-       if (.not. is_file_alive) then
-          write(*,*) trim(filename), " doesn't exist! (filename?)"
-          stop
-       end if
        open(unit=20, file=trim(filename), action='write', position='append')
        output_pattern = format_pattern("real", col_of_array2d)
        do i = 1, row_of_array2d
@@ -229,7 +219,7 @@ contains
        end do
        close(unit=20)
     else
-       open(unit=20, file=trim(filename), action='write')
+       open(unit=20, file=trim(filename), action='write', status='unknown')
        output_pattern = format_pattern("real", col_of_array2d)
        do i = 1, row_of_array2d
           write(20, trim(output_pattern)) (array2d(i,j), j=1,col_of_array2d)
@@ -247,13 +237,7 @@ contains
     complex(kind=8) :: zarray1d(row_of_zarray1d)
     logical :: append
     integer :: i
-    logical :: is_file_alive
     if (append) then
-       inquire(file=trim(filename), exist=is_file_alive)
-       if (.not. is_file_alive) then
-          write(*,*) trim(filename), " doesn't exist! (filename?)"
-          stop
-       end if
        open(unit=20, file=trim(filename), action='write', position='append')
        output_pattern = format_pattern("complex", 1)
        do i = 1, row_of_zarray1d
@@ -261,7 +245,7 @@ contains
        end do
        close(unit=20)
     else
-       open(unit=20, file=trim(filename), action='write')
+       open(unit=20, file=trim(filename), action='write', status='unknown')
        output_pattern = format_pattern("complex", 1)
        do i = 1, row_of_zarray1d
           write(20, trim(output_pattern)) zarray1d(i)
@@ -279,13 +263,7 @@ contains
     complex(kind=8) :: zarray2d(row_of_zarray2d, col_of_zarray2d)
     logical :: append
     integer :: i, j
-    logical :: is_file_alive
     if (append) then
-       inquire(file=trim(filename), exist=is_file_alive)
-       if (.not. is_file_alive) then
-          write(*,*) trim(filename), " doesn't exist! (filename?)"
-          stop
-       end if
        open(unit=20, file=trim(filename), action='write', position='append')
        output_pattern = format_pattern("complex", col_of_zarray2d)
        do i = 1, row_of_zarray2d
@@ -293,7 +271,7 @@ contains
        end do
        close(unit=20)
     else
-       open(unit=20, file=trim(filename), action='write')
+       open(unit=20, file=trim(filename), action='write', status='unknown')
        output_pattern = format_pattern("complex", col_of_zarray2d)
        do i = 1, row_of_zarray2d
           write(20, trim(output_pattern)) (zarray2d(i,j), j=1,col_of_zarray2d)
@@ -305,9 +283,3 @@ contains
 end module TAECH_IO
 
 
-!program io_test
-!  use TAECH_IO
-!  implicit none
-!  complex(kind=8) :: data(10)
-!  call save_output("data.dat", data, 10, .True.)
-!end program io_test
