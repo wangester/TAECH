@@ -121,11 +121,10 @@ program test_IFFT1D
   real(kind=8) :: s(-1000:1000)
   complex(kind=8) :: fv(-1000:1000)
   integer :: i
-  forall(i=-1000:1000) s(i) = (i*0.001)**3
-  forall(i=-1000:1000) fs(i) = (1.0D0)*exp(-1000.0D0*s(i)**2)
+  forall(i=-1000:1000) s(i) = i*0.01
+  forall(i=-1000:1000) fs(i) = exp(-0.25D0*(s(i))**2)
   call load_cfg('parameters.cfg')
   call IFFT1D(fv, 1000, fs, s)
   call save_output('data.dat', fv, 2001, .False.)
-  call save_output('data0.dat', s, 2001, .False.)
   return
 end program test_IFFT1D

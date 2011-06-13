@@ -3,7 +3,6 @@ module TAECH_LIB
   implicit none
   private
 
-
   public :: besselj
   public :: zdotu
   public :: solve_tridiag
@@ -12,7 +11,11 @@ module TAECH_LIB
   public :: interpolate
   public :: IFFT1D
   public :: IFInt2D
-  public :: resonant_peak
+
+  interface interpolate
+     module procedure interpolate_Z
+     module procedure interpolate_R
+  end interface interpolate
 
 contains
   elemental function besselj(X)
@@ -122,75 +125,6 @@ contains
   END function zdotu
 
 
-  subroutine resonant_peak(resonance, chirp_freq, subwave, twin, lres, hres)
-    implicit none
-    include "fftw3.f"
-    real(kind=8), intent(out) :: resonance, chirp_freq
-    integer, intent(in) :: twin
-    complex(kind=8), intent(in) :: subwave(1:twin)
-    real(kind=8), intent(in) :: lres, hres
-    !FFTW3 parameter
-    integer(kind=8) :: plan
-    integer :: nlfreq, nhfreq, nfreq
-    real(kind=8) :: dhfreq
-    complex(kind=8) :: subwave_wk(1:twin)
-    complex(kind=8), allocatable :: wave_spectrum(:)
-    real(kind=8), allocatable :: hfreq(:)
-    integer :: i, error
-    real(kind=8) :: wave_energy, peakval
-    nlfreq = -int(twin/2)
-    nhfreq = twin+nlfreq-1
-    nfreq = twin
-    dhfreq = 2.0*pi/(nfreq*dt)
-    allocate(hfreq(nlfreq:nhfreq), stat=error)
-    if (error.ne.0) then
-       write(*,*) "error: could not allocate memory for array hfreq in TAECH_LIB.resonant_peak"
-       stop
-    end if
-    forall(i=nlfreq:nhfreq) hfreq(i)=i*dhfreq 
-    allocate(wave_spectrum(nlfreq:nhfreq), stat=error)
-    if (error.ne.0) then
-       write(*,*) "error: could not allocate memory for array wave_spectrum in TAECH_LIB.resonant_peak"
-       stop
-    end if
-    ! 1D FFT on subwave
-    subwave_wk = subwave
-    call dfftw_plan_dft_1d(plan, twin, subwave_wk, subwave_wk, FFTW_BACKWARD, FFTW_ESTIMATE)
-    call dfftw_execute_dft(plan, subwave_wk, subwave_wk)
-    ! wave_spectrum fftshift
-    forall(i=nlfreq:-1) wave_spectrum(i) = subwave_wk(twin+i)
-    forall(i=0:nhfreq)  wave_spectrum(i) = subwave_wk(i+1)
-    call dfftw_destroy_plan(plan)
-    ! calculate the resonance energy(resonance) and chirp frequency(peakpos)
-    resonance = 0.0D0
-    wave_energy = 0.0D0
-    peakval = 0.0D0
-    do i = nlfreq, nhfreq
-       wave_energy = abs(wave_spectrum(i))**2
-       if (hfreq(i)>lres .and. hfreq(i)<hres) then
-          resonance =  resonance + wave_energy
-          if (wave_energy > peakval) then
-             peakval = wave_energy
-             chirp_freq = hfreq(i)
-          end if
-       end if
-    end do
-    wave_energy = sum(abs(wave_spectrum)**2)
-    resonance = resonance/wave_energy
-    deallocate(hfreq, stat=error)
-    if (error.ne.0) then
-       write(*,*) "error: could not deallocate memory for array hfreq in TAECH_LIB.resonant_peak"
-       stop
-    end if
-    deallocate(wave_spectrum, stat=error)
-    if (error.ne.0) then
-       write(*,*) "error: could not deallocate memory for array wave_spectrum in TAECH_LIB.resonant_peak"
-       stop
-    end if
-    return
-  end subroutine resonant_peak
-    
-
   subroutine IFFT1D(fv, M, fs, s)
     implicit none
     include "fftw3.f"
@@ -217,6 +151,7 @@ contains
     forall(p=-M:-1) fv(p) = work(p+M)
     forall(p=0:M) fv(p) = work(p-M)
     call dfftw_destroy_plan(plan)
+    fv = s(M)/M*fv
     return
   end subroutine IFFT1D
    
@@ -262,8 +197,8 @@ contains
     real(kind=8) :: fspl(4, -M:M)
     integer :: ibcxmin = 3
     integer :: ibcxmax = 3
-    real(kind=8) :: bcxmin
-    real(kind=8) :: bcxmax
+    real(kind=8) :: bcxmin = 0.0D0
+    real(kind=8) :: bcxmax = 0.0D0
     real(kind=8) :: wk(2*M+1)
     integer :: ilinx = 1
     ds_eq = s(M)/M
@@ -384,16 +319,16 @@ contains
   end subroutine IFInt2D
 
 
-  function interpolate(sgrid, fs, s, nsgrid)
+  subroutine interpolate_Z(finp, sgrid, nsgrid, fs, s, M)
     implicit none
-    integer, intent(in) :: nsgrid
-    complex(kind=8), intent(in) :: fs(1:nsgrid)
-    real(kind=8), intent(in) :: s(1:nsgrid)
-    real(kind=8), intent(in) :: sgrid
-    complex(kind=8) :: interpolate
-    real(kind=8) :: sreal, simag
+    integer, intent(in) :: nsgrid, M
+    complex(kind=8), intent(in) :: fs(-M:M)
+    real(kind=8), intent(in) :: s(-M:M)
+    real(kind=8), intent(in) :: sgrid(1:nsgrid)
+    complex(kind=8), intent(out) :: finp(1:nsgrid)
+    real(kind=8) :: sreal(1:nsgrid), simag(1:nsgrid)
     !internal variables (r8genxpkg)
-    real(kind=8) :: xpkg(1:nsgrid,4)
+    real(kind=8) :: xpkg(-M:M,4)
     integer :: iper = 0
     integer :: imsg = 0
     integer :: itol = 0
@@ -401,59 +336,115 @@ contains
     integer :: ialg = -3
     integer :: ier = 1
     !(r8cspline)
-    real(kind=8) :: fspl(4,1:nsgrid)
+    real(kind=8) :: fspl(4,-M:M)
     integer :: ibcxmin = 3
     integer :: ibcxmax = 3
-    real(kind=8) :: bcxmin 
-    real(kind=8) :: bcxmax 
-    real(kind=8) :: wk(nsgrid)
+    real(kind=8) :: bcxmin = 0.0D0
+    real(kind=8) :: bcxmax = 0.0D0
+    real(kind=8) :: wk(2*M+1)
     integer :: ilinx = 2
     !(r8spvec)
     integer :: ict(3)
     integer :: ivec
     integer :: ivd
     integer :: iwarn
-    real(kind=8) :: xvec(1)
-    real(kind=8) :: fval(1,1)
+    real(kind=8) :: xvec(1:nsgrid)
+    real(kind=8) :: fval(1:nsgrid,1)
     ict = 0
     ict(1) = 1
-    ivec = 1
-    xvec(1) = sgrid
+    ivec = nsgrid
+    xvec = sgrid
     ivd = ivec
-    call r8genxpkg(nsgrid, s, xpkg, iper, imsg, itol, ztol, ialg, ier)
+    call r8genxpkg(2*M+1, s, xpkg, iper, imsg, itol, ztol, ialg, ier)
     if (ier.ne.0) then
-       write(*,*) "error: genxpkg in TAECH_LIB.interpolate."
+       write(*,*) "error: genxpkg in TAECH_LIB.interpolate_Z."
        stop
     end if
     ! real component of fs: sreal
-    fspl(1,1:nsgrid) = real(fs(1:nsgrid))
-    call r8cspline(s, nsgrid, fspl, ibcxmin, bcxmin, ibcxmax, bcxmax, wk, nsgrid, ilinx, ier)
+    fspl(1,-M:M) = real(fs(-M:M))
+    call r8cspline(s, 2*M+1, fspl, ibcxmin, bcxmin, ibcxmax, bcxmax, wk, 2*M+1, ilinx, ier)
     if (ier.ne.0) then
-       write(*,*) "error: cspline in TAECH_LIB.interpolate."
+       write(*,*) "error: cspline in TAECH_LIB.interpolate_Z."
        stop
     end if
-    call r8spvec(ict, ivec, xvec, ivd, fval, nsgrid, xpkg, fspl, iwarn, ier)
+    call r8spvec(ict, ivec, xvec, ivd, fval, 2*M+1, xpkg, fspl, iwarn, ier)
     if (ier.ne.0) then
-       write(*,*) "error: spvec in TAECH_LIB.interpolate."
+       write(*,*) "error: spvec in TAECH_LIB.interpolate_Z."
        stop
     end if
-    sreal = fval(1,1)
+    sreal(1:nsgrid) = fval(1:nsgrid, 1)
     ! imaginary component of f: simag
-    fspl(1,1:nsgrid) = aimag(fs(1:nsgrid))
-    call r8cspline(s, nsgrid, fspl, ibcxmin, bcxmin, ibcxmax, bcxmax, wk, nsgrid, ilinx, ier)
+    fspl(1,-M:M) = aimag(fs(-M:M))
+    call r8cspline(s, 2*M+1, fspl, ibcxmin, bcxmin, ibcxmax, bcxmax, wk, 2*M+1, ilinx, ier)
     if (ier.ne.0) then
-       write(*,*) "error: cspline in TAECH_LIB.interpolate."
+       write(*,*) "error: cspline in TAECH_LIB.interpolate_Z."
        stop
     end if
-    call r8spvec(ict, ivec, xvec, ivd, fval, nsgrid, xpkg, fspl, iwarn, ier)
+    call r8spvec(ict, ivec, xvec, ivd, fval, 2*M+1, xpkg, fspl, iwarn, ier)
     if (ier.ne.0) then
-       write(*,*) "error: spvec in TAECH_LIB.fspline."
+       write(*,*) "error: spvec in TAECH_LIB.interpolate_Z."
        stop
     end if
-    simag = fval(1,1)
-    interpolate = cmplx(sreal,simag,kind=8)
+    simag(1:nsgrid) = fval(1:nsgrid, 1)
+    finp = cmplx(sreal, simag, kind=8)
     return
-  end function interpolate
+  end subroutine interpolate_Z
+
+
+  subroutine interpolate_R(yinp, x1, nx1, y, x0, nx0)
+    implicit none
+    integer, intent(in) :: nx0, nx1
+    real(kind=8), intent(in) :: y(1:nx0)
+    real(kind=8), intent(in) :: x0(1:nx0)
+    real(kind=8), intent(in) :: x1(1:nx1)
+    real(kind=8), intent(out) :: yinp(1:nx1)
+    !internal variables (r8genxpkg)
+    real(kind=8) :: xpkg(1:nx0, 4)
+    integer :: iper = 0
+    integer :: imsg = 0
+    integer :: itol = 0
+    real(kind=8) :: ztol
+    integer :: ialg = -3
+    integer :: ier = 1
+    !(r8cspline)
+    real(kind=8) :: fspl(4, 1:nx0)
+    integer :: ibcxmin = 0
+    integer :: ibcxmax = 0
+    real(kind=8) :: bcxmin 
+    real(kind=8) :: bcxmax 
+    real(kind=8) :: wk(nx0)
+    integer :: ilinx = 1
+    !(r8spvec)
+    integer :: ict(3)
+    integer :: ivec
+    integer :: ivd
+    integer :: iwarn
+    real(kind=8) :: xvec(1:nx1)
+    real(kind=8) :: fval(1:nx1,1)
+    ict = 0
+    ict(1) = 1
+    ivec = nx1
+    xvec = x1
+    ivd = ivec
+    call r8genxpkg(nx0, x0, xpkg, iper, imsg, itol, ztol, ialg, ier)
+    if (ier.ne.0) then
+       write(*,*) "error: genxpkg in TAECH_LIB.interpolate_R."
+       stop
+    end if
+    fspl(1,1:nx0) = y(1:nx0)
+    call r8cspline(x0, nx0, fspl, ibcxmin, bcxmin, ibcxmax, bcxmax, wk, nx0, ilinx, ier)
+    if (ier.ne.0) then
+       write(*,*) "error: cspline in TAECH_LIB.interpolate_R."
+       stop
+    end if
+    call r8spvec(ict, ivec, xvec, ivd, fval, nx0, xpkg, fspl, iwarn, ier)
+    if (ier.ne.0) then
+       write(*,*) "error: spvec in TAECH_LIB.interpolate_R."
+       stop
+    end if
+    yinp(1:nx1) = fval(1:nx1, 1)
+    return
+  end subroutine interpolate_R
 
     
   subroutine fspline(fs, s, M, incx)
@@ -476,8 +467,8 @@ contains
     real(kind=8) :: fspl(4,-M:M)
     integer :: ibcxmin = 3
     integer :: ibcxmax = 3 
-    real(kind=8) :: bcxmin 
-    real(kind=8) :: bcxmax 
+    real(kind=8) :: bcxmin = 0.0D0
+    real(kind=8) :: bcxmax = 0.0D0
     real(kind=8) :: wk(2*M+1)
     integer :: ilinx = 2
     !(r8spvec)
@@ -590,8 +581,8 @@ contains
     real(kind=8) :: fspl(4,-M0:M0)
     integer :: ibcxmin = 3
     integer :: ibcxmax = 3
-    real(kind=8) :: bcxmin
-    real(kind=8) :: bcxmax
+    real(kind=8) :: bcxmin = 0.0D0
+    real(kind=8) :: bcxmax = 0.0D0
     real(kind=8) :: wk(2*M0+1)
     integer :: ilinx = 2
     !(r8spvec)
@@ -616,7 +607,7 @@ contains
     fspl(1,-M0:M0) = real(fs0(-M0:M0))
     call r8cspline(s0, 2*M0+1, fspl, ibcxmin, bcxmin, ibcxmax, bcxmax, wk, 2*M0+1, ilinx, ier)
     if (ier.ne.0) then
-       write(*,*) "error: cspline in conv_fgrid"
+       write(*,*) "error: cspline in TAECH_LIB.conv_fgrid"
        stop
     end if
     call r8spvec(ict, ivec, xvec, ivd, fval, 2*M0+1, xpkg, fspl, iwarn, ier)
@@ -641,5 +632,4 @@ contains
     fs1(-M1:M1) = cmplx(fs1_real(-M1:M1), fs1_imag(-M1:M1), kind=8)
     return
   end subroutine conv_fgrid
-
 end module TAECH_LIB

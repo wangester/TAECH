@@ -6,22 +6,22 @@ module TAECH_IO
   real(kind=8), parameter, public :: pi = 3.141592653589793238462643383279D0
   complex(kind=8), parameter, public :: imagj = (0.0D0,1.0D0) 
 
-  public :: Deltam, eps, eta, deltap
-  public :: t0, tend, dt, tsave
+  public :: Deltam, eps, eta, deltap, cln
+  public :: tstart, tend, dt, tsave
   public :: modes, smax, ds
-  public :: v1, v0
-  public :: sbnd, cln1, cln2
+  public :: resonance_top, resonance_bot
+  public :: sbnd, dl0, dl1
   
   public :: load_cfg
   public :: get_input, save_output
 
-  real(kind=8) :: Deltam, eps, eta, deltap
-  integer :: t0, tend, tsave     ! unit in time step
+  real(kind=8) :: Deltam, eps, eta, deltap, cln
+  integer :: tstart, tend, tsave     ! unit in time step
   real(kind=8) :: dt
   integer :: modes
   real(kind=8) :: smax, ds
-  real(kind=8) :: v1, v0
-  real(kind=8) :: sbnd, cln1, cln2
+  real(kind=8) :: resonance_top, resonance_bot
+  real(kind=8) :: sbnd, dl0, dl1
 
   character(len=9) :: real_pattern = "ES50.30E5"  
   character(len=24) :: complex_pattern = "ES50.30E5, 1X, ES50.30E5"
@@ -46,9 +46,9 @@ contains
   subroutine load_cfg(filename)
     implicit none
     character(len=*) :: filename
-    namelist /parameters/ Deltam, eps, eta, deltap, &
-         modes, smax, ds, t0, tend, dt, tsave, &
-         v1, v0, sbnd, cln1, cln2
+    namelist /parameters/ Deltam, eps, eta, deltap, cln, &
+         modes, smax, ds, tstart, tend, dt, tsave, &
+         resonance_top, resonance_bot, sbnd, dl0, dl1
     logical :: is_file_alive
     inquire(file=trim(filename), exist=is_file_alive)
     if (.not. is_file_alive) then

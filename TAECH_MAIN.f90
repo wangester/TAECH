@@ -9,14 +9,20 @@ module TAECH_MAIN
   public :: initialize
   public :: finalize
   public :: diagnose
-  public :: predictor
-  public :: corrector
+  public :: vlasov
+  public :: track
+
+  logical, public :: is_damping = .False. 
+  logical, public :: is_debug = .True.
+  logical, public :: is_tracking = .True.
 
   real(kind=8), allocatable :: s(:)
   complex(kind=8), allocatable :: fsk(:,:)
   complex(kind=8), allocatable :: wave_ampl(:)
-  real(kind=8), allocatable :: xf(:), vf(:), frame_boost(:)
+  real(kind=8), allocatable :: xf(:), vf(:)
 
+  complex(kind=8) :: fcorr(2) 
+  logical :: is_locked 
   real(kind=8) :: elapsed
   integer :: M
   complex(kind=8), allocatable :: kernel(:)
@@ -42,16 +48,16 @@ contains
        stop
     end if
     kernel = besselj(t)
-    M = nint(dt/ds+(smax+sbnd)/dt-1)
+    M = nint(dt/(0.1D0*ds)+(smax+sbnd-dt)/ds)
     allocate(s(-M:M), stat=error)
     if (error.ne.0) then
        write(*,*) "error: could not allocate memory for s in TAECH_MAIN.initialize"
        stop
     end if
-    gen = nint(dt/ds)
-    forall(i=-gen:gen) s(i) = i*ds
-    forall(i=-M:-gen-1) s(i) = s(-gen)+(i+gen)*dt
-    forall(i=gen+1:M) s(i) = s(gen)+(i-gen)*dt
+    gen = nint(dt/(0.1D0*ds))
+    forall(i=-gen:gen) s(i) = i*(0.1D0*ds)
+    forall(i=-M:-gen-1) s(i) = s(-gen)+(i+gen)*ds
+    forall(i=gen+1:M) s(i) = s(gen)+(i-gen)*ds
     allocate(fsk(-M:M,0:modes), stat=error)
     if (error.ne.0) then
        write(*,*) "error: could not allocate memory for fsk in TAECH_MAIN.initialize"
@@ -77,21 +83,20 @@ contains
        stop
     end if
     vf = 0.0D0
-    allocate(frame_boost(0:tend), stat=error)
-    if (error.ne.0) then
-       write(*,*) "error: could not allocate memory for frame_boost in TAECH_MAIN.initialize"
-       stop
-    end if
-    frame_boost = 0.0D0
-    if (t0 == 0) then
+    if (tstart == 0) then
        call startup()
-    ! resume the job when t0/=0
+    ! resume the job when tstart/=0
     else
-       call get_input('./resume_job/wave_ampl.dat', wave_ampl, t0+1)
-       call get_input('./resume_job/frame_pos.dat', xf, t0+1)
-       call get_input('./resume_job/frame_vel.dat', vf, t0+1)
-       call get_input('./resume_job/frame_accel.dat', frame_boost, t0+1)
+       call get_input('./resume_job/wave_ampl.dat', wave_ampl, tstart+1)
+       call get_input('./resume_job/frame_pos.dat', xf, tstart+1)
+       call get_input('./resume_job/frame_vel.dat', vf, tstart+1)
        call get_input('./resume_job/fsk.dat', fsk, 2*M+1, modes+1)
+       call get_input('./resume_job/frame.dat', fcorr, 2)
+       if (abs(fcorr(1)) .ne. 0.0D0) then 
+          is_locked = .True.
+       else
+          is_locked = .False.
+       end if
     end if
     return
   end subroutine initialize
@@ -101,13 +106,12 @@ contains
     implicit none
     integer :: error
     call save_output('./results/wave_ampl.dat', wave_ampl, tend+1, .False.)
-    call save_output('./results/chirp_rate.dat', frame_boost, tend+1, .False.)
     call save_output('./results/chirp_freq.dat', vf, tend+1, .False.)
     call save_output('./resume_job/wave_ampl.dat', wave_ampl, tend+1, .False.)
     call save_output('./resume_job/frame_pos.dat', xf, tend+1, .False.)
     call save_output('./resume_job/frame_vel.dat', vf, tend+1, .False.)
-    call save_output('./resume_job/frame_accel.dat', frame_boost, tend+1, .False.)
     call save_output('./resume_job/fsk.dat', fsk, 2*M+1, modes+1, .False.)
+    call save_output('./resume_job/frame.dat', fcorr, 2, .False.)
     deallocate(s, stat=error)
     if (error.ne.0) then
        write(*,*) "error: could not deallocate memory for array s in TAECH_MAIN.finalize"
@@ -131,11 +135,6 @@ contains
     deallocate(vf, stat=error)
     if (error.ne.0) then
        write(*,*) "error: could not deallocate memory for array vf in TAECH_MAIN.finalize"
-       stop
-    end if
-    deallocate(frame_boost, stat=error)
-    if (error.ne.0) then
-       write(*,*) "error: could not deallocate memory for array frame_boost in TAECH_MAIN.finalize"
        stop
     end if
     deallocate(kernel, stat=error)
@@ -163,6 +162,7 @@ contains
     real(kind=8) :: fvx_resonance(-10*M:10*M, -modes-1:modes+1)
     complex(kind=8) :: fsk_lab(-M:M, 0:modes)
     complex(kind=8) :: fv_wave(-M:M)
+    real(kind=8) :: chirp_freq, chirp_ergy
     real(kind=8) :: v(-M:M)
     real(kind=8) :: dv
     real(kind=8) :: lres, hres
@@ -170,104 +170,153 @@ contains
     integer :: p, q
     if (mod(nt,tsave) == 0) then    
        forall(p=-M:M, q=0:modes) fsk_lab(p,q) = fsk(p,q)*exp(-imagj*q*xf(nt)+imagj*s(p)*vf(nt))
-       call IFInt2D(fvx_wave(-M:M, -modes-1:modes+1), M, fsk(-M:M,0:modes), M, modes, s(-M:M))
+       call IFInt2D(fvx_wave, M, fsk, M, modes, s)
        call IFInt2D(fvx_lab, M, fsk_lab, M, modes, s)
        call IFInt2D(fvx_resonance, 10*M, fsk_lab, M, modes, s)
-       call IFFT1D(fv_wave(-M:M), M, fsk(-M:M,0), s)
-       lres = v0+vf(nt)
+       lres = resonance_bot+vf(nt)-0.5D0
        nlres = nint(10*s(M)*lres/pi)
-       hres = v1+vf(nt)
+       hres = resonance_top+vf(nt)+0.5D0
        nhres = nint(10*s(M)*hres/pi)
        dv = pi/s(M)
        forall(p=-M:M) v(p) = p*dv
        forall(p=-M:M) f_fvx_lab(p,-modes-1:modes+1) = fvx_lab(p,-modes-1:modes+1)+v(p)
-       call save_output('./diagnostics/fv_wave.dat',fv_wave, 2*M+1, .True. )
-       call save_output('./diagnostics/wave_ampl.dat', wave_ampl(0:nt), nt+1, .False.)
-       call save_output('./diagnostics/chirp_rate.dat', frame_boost(0:nt), nt+1, .False.)
-       call save_output('./diagnostics/chirp_freq.dat', vf(0:nt), nt+1, .False.)
-       call save_output('./diagnostics/fsk_wave.dat', fsk, 2*M+1, modes+1, .True.)
-       call save_output('./diagnostics/fsk_lab.dat', fsk_lab, 2*M+1, modes+1, .True.)
        call save_output('./results/fvx_wave.dat', fvx_wave, 2*M+1, 2*modes+3, .True.)
        call save_output('./results/fvx_lab.dat', fvx_lab, 2*M+1, 2*modes+3, .True.)
        call save_output('./results/f_fvx_lab.dat', f_fvx_lab, 2*M+1, 2*modes+3, .True.)
        call save_output('./results/fvx_resonance.dat', & 
             fvx_resonance(nlres:nhres,:), nhres-nlres+1, 2*modes+3, .True.)
+       if (is_debug) then
+          call IFFT1D(fv_wave(-M:M), M, fsk(-M:M,0), s)         
+          call save_output('./diagnostics/fv_wave.dat',fv_wave, 2*M+1, .True. )
+          call save_output('./diagnostics/wave_ampl.dat', wave_ampl(0:nt), nt+1, .False.)
+          call save_output('./diagnostics/chirp_freq.dat', vf(0:nt), nt+1, .False.)
+          call save_output('./diagnostics/fsk_wave.dat', fsk, 2*M+1, modes+1, .True.)
+          call save_output('./diagnostics/fsk_lab.dat', fsk_lab, 2*M+1, modes+1, .True.)
+       end if
     end if
     write(*,*) nt, wave_ampl(nt) 
-    !write(*,*) nt, resonant_density(fsk(-M:M,0), M, s)
+    if (nt>nint(100/dt) .and. is_debug) then
+       call chirp(chirp_freq, chirp_ergy, wave_ampl(nt-nint(100/dt):nt), &
+            nint(100/dt), resonance_bot, resonance_top)
+       write(*,*) chirp_freq, chirp_ergy
+       write(*,*) resonant_density(fsk(-M:M,0), M, s)
+       write(*,*) resonant_position(fsk, M, modes, s)
+       write(*,*) resonant_velocity(fsk(-M:M,0), M, s)
+    end if
     return
   end subroutine diagnose
 
 
-  subroutine boundary(bnd1, bnd2, N, sgrid)
+  subroutine set_damping(damping, N, position, is_damping)
     implicit none
     integer, intent(in) :: N
-    real(kind=8), intent(in) :: sgrid(-N:N)
-    real(kind=8), intent(out) :: bnd1(-N:N)
-    real(kind=8), intent(out) :: bnd2(-N:N)
-    where (sgrid<=smax .and. sgrid>=-smax)  
-       bnd1 = 1.0D0
-       bnd2 = 0.0D0
-    elsewhere (sgrid>smax .and. sgrid<=s(M)) 
-       bnd1 = exp(-cln1*(sgrid-smax)/sbnd)
-       bnd2 = 3.0D0*cln2*(sgrid-smax)**2/sbnd**2
-    elsewhere (sgrid>=s(-M) .and. sgrid<-smax) 
-       bnd1 = exp(-cln1*(-sgrid-smax)/sbnd)
-       bnd2 = 3.0D0*cln2*(sgrid+smax)**2/sbnd**2
+    real(kind=8), intent(out) :: damping(-N:N)
+    real(kind=8), intent(in) :: position(-N:N)
+    logical, intent(in) :: is_damping
+    if (is_damping) then
+       damping = cln*position**2
+    else
+       where (position<=smax .and. position>=-smax)
+          damping = 0.0D0
+       elsewhere (position>smax .and. position<=s(M))
+          damping = dl0*((position-smax)/sbnd)**2
+       elsewhere (position>=s(-M) .and. position<-smax)
+          damping = dl0*((position+smax)/sbnd)**2
+       elsewhere
+          damping = 0.0D0
+       end where
+    end if
+    return
+  end subroutine set_damping
+
+
+  subroutine set_boundary(bnd, N, position)
+    implicit none
+    integer, intent(in) :: N
+    real(kind=8), intent(out) :: bnd(-N:N)
+    real(kind=8), intent(in) :: position(-N:N)
+    where (position<=smax .and. position>=-smax)  
+       bnd = 1.0D0
+    elsewhere (position>smax .and. position<=s(M)) 
+       bnd = exp(-dl1*(position-smax)/sbnd)
+    elsewhere (position>=s(-M) .and. position<-smax) 
+       bnd = exp(-dl1*(-position-smax)/sbnd)
     elsewhere
-       bnd1 = 0.0D0
-       bnd2 = 0.0D0
+       bnd = 0.0D0
     end where
     return
-  end subroutine boundary
+  end subroutine set_boundary
 
 
   subroutine startup()
     implicit none
-    ! predictor
-    wave_ampl(1) = 1.0D0/(Deltam-0.5D0*dt+imagj*(pi*eta-1.0D0)) &
+    complex(kind=8) :: deltaf(-modes:modes,0:M)
+    complex(kind=8) :: sub_diag(-modes:modes), diag(-modes:modes), sup_diag(-modes:modes)
+    complex(kind=8) :: rhs(-modes:modes)
+    real(kind=8) :: bnd0(-modes:modes), bnd1(-modes:modes)
+    real(kind=8) :: damping0(-modes:modes), damping1(-modes:modes)
+    real(kind=8) :: sft(-modes:modes)
+    integer :: p, q
+    is_locked = .False.
+    sft = 0.0D0
+    call set_damping(damping0, modes, sft, is_damping)
+    wave_ampl(1) = 1.0D0/(Deltam-0.5D0*dt+imagj*(pi*eta/(1.0D0+0.5D0*dt*damping0(1))-1.0D0)) &
          * ((1.0D0+dt/(2.0D0*(Deltam-imagj)))*deltap*kernel(1)*exp(-eps*t(1)))
-    call vlasov(0)
-    ! corrector
-    wave_ampl(1) = 1.0D0/(Deltam-0.5D0*dt-imagj) &
-         * ((1.0D0+dt/(2.0D0*(Deltam-imagj)))*deltap*kernel(1)*exp(-eps*t(1)) &
-         - imagj*4.0D0*pi*eta*fsk(0,1))
-    call vlasov(0)
+    do p = 0, M
+       forall(q=-modes:modes) sft(q) = s(p)
+       call set_boundary(bnd0, modes, sft)
+       call set_damping(damping0, modes, sft, is_damping)
+       forall(q=-modes:modes) sft(q) = s(p)-q*dt
+       call set_boundary(bnd1, modes, sft)
+       call set_damping(damping1, modes, sft, is_damping)
+       forall(q=-modes:modes) sub_diag(q) = imagj*0.25D0*dt*s(p)*bnd0(q)*wave_ampl(1)
+       forall(q=-modes:modes) diag(q) = 1.0D0 + 0.5D0*dt*damping0(q)
+       forall(q=-modes:modes) sup_diag(q) = imagj*0.25D0*dt*s(p)*bnd0(q)*conjg(wave_ampl(1))
+       forall(q=-modes:modes) rhs(q) = (0.0D0, 0.0D0)
+       if (s(p) > 0.5D0*(0.1D0*ds) .and. s(p) < dt-0.5D0*(0.1D0*ds)) then
+          rhs(1) = rhs(1) + 0.5D0/dt*(s(p)*wave_ampl(0)+(dt-s(p))*wave_ampl(1))
+       elseif (p == 0) then
+          rhs(1) = rhs(1) + 0.25D0*wave_ampl(1)
+          rhs(-1) = rhs(-1) + 0.25D0*conjg(wave_ampl(1))
+       elseif (abs(s(p)-dt) <= 0.5D0*(0.1D0*ds)) then 
+          rhs(1) = rhs(1) + 0.25D0*wave_ampl(0)
+       end if
+       call solve_tridiag(sub_diag(-modes:modes), diag(-modes:modes), &
+            sup_diag(-modes:modes), rhs(-modes:modes), deltaf(-modes:modes,p), 2*modes+1)
+    end do
+    fsk(0:M, 0:modes) = transpose(deltaf(0:modes, 0:M))+(0.0D0,0.0D0)
+    fsk(-M:-1, 0:modes) = conjg(transpose(deltaf(0:-modes:-1, M:1:-1))+(0.0D0,0.0D0))
     return
   end subroutine startup
  
-  
+
   subroutine track(nt)
     implicit none
     integer, intent(in) :: nt
-    logical :: locked=.False.
     integer :: twin
+    if (.not. is_tracking) then 
+       return
+    end if
     twin = nint(100/dt)
-    if (.not.locked) then
-       if (nt>=twin .and. &
-            abs(resonant_density(fsk(-M:M,0), M, s))>1.0D-2 .and. &
-            is_resonant(wave_ampl(nt-twin+1:nt), twin) .and. &
-            is_tracking(fsk(-M:M,0), M, s)) then
-          locked = .True.
-       end if
+    if (.not.is_locked .and. nt>=twin .and. &
+         is_resonant(wave_ampl(nt-twin:nt), twin, fsk(-M:M,0), M, s))  then
+       is_locked = .True.
     end if
-    if (locked) then   
-       frame_boost(nt) = frame_accel(fsk(-M:M,1), M, wave_ampl(nt), s) &
-            /resonant_density(fsk(-M:M,0), M, s)
-       vf(nt+1) = vf(nt)+frame_boost(nt)*dt
-       xf(nt+1) = xf(nt)+dt*(vf(nt)+vf(nt+1))/2.0D0
+    if (is_locked .and. nt>=nint(4000/dt) .and. &
+         (vf(nt)<-pi/dt .or. resonant_density(fsk(-M:M,0), M, s) &
+         < 1.5D0*pi*(resonance_top-resonance_bot)**2))  then
+       is_locked = .False.
+    end if
+    if (is_locked) then
+       fcorr(1) = resonant_filter(fsk(-M:M,0), fsk(-M:M,1), M, s)
+       fcorr(2) = conjg(fcorr(1))
+       vf(nt+1) = vf(nt)+0.5D0*dt*real(wave_ampl(nt)*fcorr(2)+conjg(wave_ampl(nt))*fcorr(1))
+       xf(nt+1) = xf(nt)+0.5D0*dt*(vf(nt)+vf(nt+1)) 
     else
-       frame_boost(nt) = 0.0D0
-       vf(nt+1) = 0.0D0
-       xf(nt+1) = 0.0D0
+       fcorr = (0.0D0, 0.0D0)
+       vf(nt+1) = vf(nt)
+       xf(nt+1) = xf(nt)+0.5D0*dt*(vf(nt)+vf(nt+1))
     end if
-    !IF (nt>twin) then
-       !WRITE(*,*) resonant_velocity(fsk(-M:M,0), M, s)/resonant_density(fsk(-M:M,0), M, s)
-       !CALL resonant_peak(resonance, chirp_freq, wave_ampl(nt-twin+1:nt), twin, v0, v1)
-       !WRITE(*,*) resonance, chirp_freq
-       !WRITE(*,*) is_resonant(wave_ampl(nt-twin+1:nt), twin), is_tracking(fsk(-M:M,0), M, s)
-       !WRITE(*,*) resonant_density(fsk(-M:M,0), M, s)
-    !END IF
     return
   end subroutine track
 
@@ -276,18 +325,17 @@ contains
     implicit none
     integer, intent(in) :: nt
     complex(kind=8) :: deltaf(-modes:modes,0:M)
+    complex(kind=8) :: sub_diag(-modes:modes), diag(-modes:modes), sup_diag(-modes:modes)
+    complex(kind=8) :: rhs(-modes:modes)
+    real(kind=8) :: bnd0(-modes:modes), bnd1(-modes:modes)
+    real(kind=8) :: damping0(-modes:modes), damping1(-modes:modes)
+    real(kind=8) :: sft(-modes:modes)
     complex(kind=8) :: spfminus(-M:M, -modes-1:modes+1)
     complex(kind=8) :: spf0(-M:M, -modes-1:modes+1)
     complex(kind=8) :: spfplus(-M:M, -modes-1:modes+1)
-    complex(kind=8) :: sub_diag(-modes:modes), diag(-modes:modes), sup_diag(-modes:modes)
-    complex(kind=8) :: rhs(-modes:modes)
-    complex(kind=8) :: wave_mid
-    real(kind=8) :: alpha
     real(kind=8) :: incx
-    real(kind=8) :: bnd1(-modes:modes), bnd2(-modes:modes)
-    real(kind=8) :: sft(-modes:modes)
     integer :: p, q
-    wave_mid = 0.5D0*(wave_ampl(nt)+wave_ampl(nt+1))
+    ! calculate the distribution at old time step along the characteristic line 
     spf0(-M:M, 0:modes) = fsk(-M:M, 0:modes)
     spf0(-M:M, -modes:-1) = conjg(fsk(M:-M:-1, modes:1:-1))
     spf0(-M:M, -modes-1) = (0.0D0, 0.0D0)
@@ -300,24 +348,54 @@ contains
        call fspline(spf0(-M:M, q), s, M, incx)
        call fspline(spfplus(-M:M, q+1), s, M, incx)
     end do
+    ! boundary condition and set damping when s=0 
+    sft = 0.0
+    call set_boundary(bnd0, modes, sft)
+    call set_damping(damping0, modes, sft, is_damping)
+    forall(q=-modes:modes) sft(q) = -q*dt
+    call set_boundary(bnd1, modes, sft)
+    call set_damping(damping1, modes, sft, is_damping)
+    do q = -modes, modes
+       deltaf(q,0) = 1.0D0/(1.0D0+0.5D0*dt*damping0(q)) &
+            *( -imagj*0.25D0*dt*(-q*dt)*bnd1(q)*wave_ampl(nt)*spfminus(0,q-1) &
+               -0.5D0*dt*(0.5D0*imagj*(-q*dt)*bnd1(q)*(wave_ampl(nt)*fcorr(2) &
+               +conjg(wave_ampl(nt))*fcorr(1))+damping1(q)+damping0(q))*spf0(0,q) &
+               -imagj*0.25D0*dt*(-q*dt)*bnd1(q)*conjg(wave_ampl(nt))*spfplus(0,q+1) )
+    end do
+    forall(q=0:modes) fsk(0,q) = deltaf(q,0) + spf0(0,q)
+    ! solve the wave equation
+    wave_ampl(nt+1) = 1.0D0/(Deltam-0.5D0*dt+imagj*(pi*eta/(1.0D0+0.5D0*dt*damping0(1))-1.0D0)) &
+         * (dt*exp(imagj*xf(nt+1))*zdotu(nt, wave_ampl(1:nt)*exp(-imagj*xf(1:nt)), 1, &
+         kernel(1:nt)*exp(-eps*t(1:nt)), -1)+(1.0D0+dt/(2.0D0*(Deltam-imagj))) &
+         * deltap*kernel(nt+1)*exp(-eps*t(nt+1)+imagj*xf(nt+1)) &
+         - imagj*4.0D0*pi*eta*fsk(0,1))
+    ! solve the vlasov equation 
     do p = 0, M
-       alpha = frame_boost(nt) 
-       forall(q=-modes:modes) sft(q) = s(p)-0.5D0*q*dt
-       call boundary(bnd1, bnd2, modes, sft)
-       forall(q=-modes:modes) sub_diag(q) = imagj*dt/4.0D0*sft(q)*bnd1(q)*wave_mid
-       forall(q=-modes:modes) diag(q) = 1.0D0+imagj*dt/2.0D0 &
-            * (sft(q)*bnd1(q)*alpha-imagj*bnd2(q))
-       forall(q=-modes:modes) sup_diag(q) = imagj*dt/4.0D0*sft(q)*bnd1(q)*conjg(wave_mid)
-       forall(q=-modes:modes) rhs(q) = -imagj*dt*sft(q)*bnd1(q) &
-            * (wave_mid*(spfminus(p,q-1)+spf0(p,q-1))/4.0D0 &
-            + conjg(wave_mid)*(spfplus(p,q+1)+spf0(p,q+1))/4.0D0) &
-            - imagj*dt*(sft(q)*bnd1(q)*alpha-imagj*bnd2(q))*spf0(p,q)
-       if (s(p) > 0.5D0*ds .and. s(p) < dt-0.5D0*ds) then
+       forall(q=-modes:modes) sft(q) = s(p)
+       call set_boundary(bnd0, modes, sft)
+       call set_damping(damping0, modes, sft, is_damping)
+       forall(q=-modes:modes) sft(q) = s(p)-q*dt
+       call set_boundary(bnd1, modes, sft)
+       call set_damping(damping1, modes, sft, is_damping)
+       forall(q=-modes:modes) sub_diag(q) = imagj*0.25D0*dt*s(p)*bnd0(q)*wave_ampl(nt+1)
+       forall(q=-modes:modes) diag(q) = 1.0D0+imagj*0.25D0*dt*s(p)*bnd0(q) &
+            * (wave_ampl(nt+1)*fcorr(2)+conjg(wave_ampl(nt+1))*fcorr(1)) &
+            + 0.5D0*dt*damping0(q)
+       forall(q=-modes:modes) sup_diag(q) = imagj*0.25D0*dt*s(p)*bnd0(q)*conjg(wave_ampl(nt+1))
+       forall(q=-modes:modes) rhs(q) = -imagj*0.25D0*dt &
+            * (sft(q)*bnd1(q)*wave_ampl(nt)*spfminus(p,q-1)+s(p)*bnd0(q)*wave_ampl(nt+1)*spf0(p,q-1)) &
+            - 0.5D0*dt*(0.5D0*imagj*sft(q)*bnd1(q) &
+            * (wave_ampl(nt)*fcorr(2)+conjg(wave_ampl(nt))*fcorr(1)) &
+            + damping1(q)+0.5D0*imagj*s(p)*bnd0(q)*(wave_ampl(nt+1)*fcorr(2) &
+            + conjg(wave_ampl(nt+1))*fcorr(1))+damping0(q))*spf0(p,q) &
+            - imagj*0.25D0*dt*(sft(q)*bnd1(q)*conjg(wave_ampl(nt))*spfplus(p,q+1) &
+            + s(p)*bnd0(q)*conjg(wave_ampl(nt+1))*spf0(p,q+1))
+       if (s(p) > 0.5D0*(0.1D0*ds) .and. s(p) < dt-0.5D0*(0.1D0*ds)) then
           rhs(1) = rhs(1) + 0.5D0/dt*(s(p)*wave_ampl(nt)+(dt-s(p))*wave_ampl(nt+1))
        elseif (p == 0) then
           rhs(1) = rhs(1) + 0.25D0*wave_ampl(nt+1)
           rhs(-1) = rhs(-1) + 0.25D0*conjg(wave_ampl(nt+1))
-       elseif (abs(s(p)-dt) <= 0.5D0*ds) then 
+       elseif (abs(s(p)-dt) <= 0.5D0*(0.1D0*ds)) then 
           rhs(1) = rhs(1) + 0.25D0*wave_ampl(nt)
        end if
        call solve_tridiag(sub_diag(-modes:modes), diag(-modes:modes), &
@@ -327,38 +405,6 @@ contains
     fsk(-M:-1, 0:modes) = conjg(transpose(deltaf(0:-modes:-1, M:1:-1))+spf0(M:1:-1,0:-modes:-1))
     return
   end subroutine vlasov
-
-
-  subroutine predictor(nt)
-    implicit none
-    integer, intent(in) :: nt
-    complex(kind=8) :: f0, f1, f2
-    !call track(nt)
-    f0 = interpolate(-dt, fsk(-M:M,0), s(-M:M), 2*M+1)
-    f1 = interpolate(-dt, fsk(-M:M,1), s(-M:M), 2*M+1)
-    f2 = interpolate(-dt, fsk(-M:M,2), s(-M:M), 2*M+1)
-    wave_ampl(nt+1) = 1.0D0/(Deltam-0.5D0*dt+imagj*(pi*eta-1.0D0)) &
-         * (dt*exp(imagj*xf(nt+1))*zdotu(nt, wave_ampl(1:nt)*exp(-imagj*xf(1:nt)), 1, &
-         kernel(1:nt)*exp(-eps*t(1:nt)), -1)+(1.0D0+dt/(2.0D0*(Deltam-imagj))) &
-         * deltap*kernel(nt+1)*exp(-eps*t(nt+1)+imagj*xf(nt+1)) &
-         + 2.0D0*pi*eta*(dt**2*frame_boost(nt)-2.0D0*imagj)*f1 &
-         + pi*eta*dt**2*(wave_ampl(nt)*f0+conjg(wave_ampl(nt))*f2))
-    call vlasov(nt)
-    return
-  end subroutine predictor
-
-
-  subroutine corrector(nt)
-    implicit none
-    integer, intent(in) :: nt
-    wave_ampl(nt+1) = 1.0D0/(Deltam-0.5D0*dt-imagj) &
-         * (dt*exp(imagj*xf(nt+1))*zdotu(nt, wave_ampl(1:nt)*exp(-imagj*xf(1:nt)), 1, &
-         kernel(1:nt)*exp(-eps*t(1:nt)), -1)+(1.0D0+dt/(2.0D0*(Deltam-imagj))) &
-         * deltap*kernel(nt+1)*exp(-eps*t(nt+1)+imagj*xf(nt+1)) &
-         - imagj*4.0D0*pi*eta*fsk(0,1))
-    !call vlasov(nt)
-    return
-  end subroutine corrector
 end module TAECH_MAIN
 
 
@@ -370,10 +416,10 @@ program TAECH
   implicit none
   integer :: nt 
   call initialize()
-  do nt = t0+1, tend-1
-     call diagnose(nt)
-     call predictor(nt)
-     call corrector(nt)
+  do nt = max(1,tstart), tend-1
+     call track(nt)
+     call vlasov(nt)
+     call diagnose(nt+1)
   end do
   call finalize()
   return
