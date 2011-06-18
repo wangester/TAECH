@@ -11,7 +11,7 @@ module TAECH_TRACK
   public :: resonant_velocity
   public :: resonant_filter
 
-  integer, parameter :: res_size = 200
+  integer, parameter :: res_size = 100
 contains
   function is_resonant(subwave, twin, fs0, M, s)
     implicit none
@@ -24,9 +24,10 @@ contains
     real(kind=8) :: chirp_freq, chirp_ergy
     call chirp(chirp_freq, chirp_ergy, subwave, twin, resonance_bot, resonance_top)
     if ( chirp_ergy > 0.1D0 .and. &
-         abs(resonant_velocity(fs0,M,s) &
-        - (resonance_bot+resonance_top)/2.0D0)<0.015D0 .and. &
-         resonant_density(fs0, M, s)>1.8D0*pi*(resonance_top-resonance_bot)**2) then
+         abs(resonant_velocity(fs0, M, s, resonance_bot, resonance_top) &
+         - (resonance_bot+resonance_top)/2.0D0)<0.015D0 .and. &
+         resonant_density(fs0, M, s, resonance_bot, resonance_top) &
+         > 1.8D0*pi*(resonance_top-resonance_bot)**2) then
        is_resonant = .True.
     else
        is_resonant = .False.
@@ -35,11 +36,12 @@ contains
   end function is_resonant
 
 
-  function resonant_density(fs0, M, s)
+  function resonant_density(fs0, M, s, lres, hres)
     implicit none
     integer, intent(in) :: M
     complex(kind=8), intent(in) :: fs0(-M:M)
     real(kind=8), intent(in) :: s(-M:M)
+    real(kind=8), intent(in) :: lres, hres
     real(kind=8) :: resonant_density
     complex(kind=8) :: fv0(-M:M)
     complex(kind=8) :: res_fv0(0:res_size)  
@@ -50,21 +52,22 @@ contains
     integer :: i
     dv = pi/s(M)
     forall(i=-M:M) v(i) = i*dv
-    res_dv = (resonance_top-resonance_bot)/res_size
-    forall(i=0:res_size) res_v(i) = resonance_bot+i*res_dv
+    res_dv = (hres-lres)/res_size
+    forall(i=0:res_size) res_v(i) = lres+i*res_dv
     call IFFT1D(fv0, M, fs0, s)
     call interpolate(res_fv0, res_v, res_size+1, fv0, v, M)
     resonant_density = 2.0D0*pi*real(sum(res_fv0)-0.5D0*(res_fv0(0)+res_fv0(res_size))) &
-                     * res_dv+pi*(resonance_top-resonance_bot)**2 
+                     * res_dv+pi*(hres-lres)**2 
     return
   end function resonant_density
    
 
-  function resonant_position(fsk, M, N, s)
+  function resonant_position(fsk, M, N, s, lres, hres)
     implicit none
     integer, intent(in) :: M, N
     complex(kind=8), intent(in) :: fsk(-M:M, 0:N)
     real(kind=8), intent(in) :: s(-M:M)
+    real(kind=8), intent(in) :: lres, hres
     real(kind=8) :: resonant_position
     complex(kind=8) :: fv(-M:M)
     complex(kind=8) :: fs(-M:M)
@@ -76,8 +79,8 @@ contains
     integer :: i
     dv = pi/s(M)
     forall(i=-M:M) v(i) = i*dv
-    res_dv = (resonance_top-resonance_bot)/res_size
-    forall(i=0:res_size) res_v(i) = resonance_bot+i*res_dv
+    res_dv = (hres-lres)/res_size
+    forall(i=0:res_size) res_v(i) = lres+i*res_dv
     fs = (0.0D0, 0.0D0)
     do i = 1, N
        fs(-M:M) = fs(-M:M)+imagj*(-1)**i/i*(conjg(fsk(M:-M:-1,i))-fsk(-M:M,i))
@@ -85,16 +88,17 @@ contains
     call IFFT1D(fv, M, fs, s)
     call interpolate(res_fv, res_v, res_size+1, fv, v, M)
     resonant_position = 2.0D0*pi*real(sum(res_fv)-0.5D0*(res_fv(0)+res_fv(res_size)))*res_dv &
-         / resonant_density(fsk(-M:M,0), M, s)
+         / resonant_density(fsk(-M:M,0), M, s, lres, hres)
     return
   end function resonant_position
 
 
-  function resonant_velocity(fs0, M, s)
+  function resonant_velocity(fs0, M, s, lres, hres)
     implicit none
     integer, intent(in) :: M
     complex(kind=8), intent(in) :: fs0(-M:M)
     real(kind=8), intent(in) :: s(-M:M)
+    real(kind=8), intent(in) :: lres, hres
     real(kind=8) :: resonant_velocity
     complex(kind=8) :: fv0(-M:M)
     complex(kind=8) :: res_fv0(0:res_size)
@@ -105,24 +109,25 @@ contains
     integer :: i
     dv = pi/s(M)
     forall(i=-M:M) v(i) = i*dv 
-    res_dv = (resonance_top-resonance_bot)/res_size
-    forall(i=0:res_size) res_v(i) = resonance_bot+i*res_dv
+    res_dv = (hres-lres)/res_size
+    forall(i=0:res_size) res_v(i) = lres+i*res_dv
     call IFFT1D(fv0, M, fs0, s)
     fv0 = v*fv0
     call interpolate(res_fv0, res_v, res_size+1, fv0, v, M)
     resonant_velocity = (2.0D0*pi*real(sum(res_fv0)-0.5D0*(res_fv0(0)+res_fv0(res_size)))*res_dv &
-                      + 2.0D0/3.0D0*pi*(resonance_top**3-resonance_bot**3)-pi*resonance_bot &
-                      * (resonance_top**2-resonance_bot**2))/resonant_density(fs0, M, s)
+                      + 2.0D0/3.0D0*pi*(hres**3-lres**3)-pi*lres &
+                      * (hres**2-lres**2))/resonant_density(fs0, M, s, lres, hres)
     return
   end function resonant_velocity
 
 
-  function resonant_filter(fs0, fs1, M, s)
+  function resonant_filter(fs0, fs1, M, s, lres, hres)
     implicit none
     integer, intent(in) :: M
     complex(kind=8), intent(in) :: fs1(-M:M)
     complex(kind=8), intent(in) :: fs0(-M:M)
     real(kind=8), intent(in) :: s(-M:M)
+    real(kind=8), intent(in) :: lres, hres
     complex(kind=8) :: resonant_filter
     complex(kind=8) :: fv0(-M:M)
     complex(kind=8) :: fv1(-M:M)
@@ -136,19 +141,19 @@ contains
     integer :: i
     dv = pi/s(M)
     forall(i=-M:M) v(i) = i*dv
-    res_v0 = (resonance_bot+resonance_top)/2.0D0 !resonant_velocity(fs0, M, s)  
-    res_dv = (resonance_top-resonance_bot)/res_size
-    forall(i=0:res_size) res_v(i) = resonance_bot+i*res_dv
+    res_v0 = resonant_velocity(fs0, M, s, lres, hres) !(resonance_bot+resonance_top)/2.0D0   
+    res_dv = (hres-lres)/res_size
+    forall(i=0:res_size) res_v(i) = lres+i*res_dv
     call IFFT1D(fv0, M, fs0, s)
     call interpolate(res_fv0, res_v, res_size+1, fv0, v, M)
     call IFFT1D(fv1, M, fs1, s)
     call interpolate(res_fv1, res_v, res_size+1, fv1, v, M)
-    resonant_filter = -( 2.0D0*pi*(resonance_top-res_v0)*res_fv1(res_size) &
-                      - 2.0D0*pi*(resonance_bot-res_v0)*res_fv1(0) &
-                      - 2.0D0*pi*(sum(res_fv1)-0.5D0*(res_fv1(0)+res_fv1(res_size)))*res_dv) &
-                    / ( 2.0D0*pi*(resonance_top-res_v0)*res_fv0(res_size) &
-                      - 2.0D0*pi*(resonance_bot-res_v0)*res_fv0(0) &
-                      - 2.0D0*pi*(sum(res_fv0)-0.5D0*(res_fv0(0)+res_fv0(res_size)))*res_dv)
+    resonant_filter = -((hres-res_v0)*res_fv1(res_size) &
+                      - (lres-res_v0)*res_fv1(0) &
+                      - (sum(res_fv1)-0.5D0*(res_fv1(0)+res_fv1(res_size)))*res_dv) &
+                    / ( (hres-res_v0)*res_fv0(res_size) &
+                      - (lres-res_v0)*res_fv0(0) &
+                      - (sum(res_fv0)-0.5D0*(res_fv0(0)+res_fv0(res_size)))*res_dv)
     return
   end function resonant_filter
 

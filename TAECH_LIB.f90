@@ -11,6 +11,7 @@ module TAECH_LIB
   public :: interpolate
   public :: IFFT1D
   public :: IFInt2D
+  public :: visualize
 
   interface interpolate
      module procedure interpolate_Z
@@ -156,33 +157,37 @@ contains
   end subroutine IFFT1D
    
 
-  subroutine IFInt2D(fvx, vdim, fsk, M, N, s)
+  subroutine IFInt2D(fvx, vlres, vhres, vdim, fsk, M, N, s)
     implicit none
     include "fftw3.f"
     integer, intent(in) :: M, N, vdim
-    real(kind=8), intent(out) :: fvx(-vdim:vdim, -N-1:N+1)
+    real(kind=8), intent(in) :: vlres, vhres
+    real(kind=8), intent(out) :: fvx(0:vdim, -N-1:N+1)
     complex(kind=8), intent(in) :: fsk(-M:M, 0:N)
     real(kind=8), intent(in) :: s(-M:M)
     real(kind=8) :: s_eq(-M:M)
     ! temporary variables
-    real(kind=8) :: x(-N-1:N+1), v(-vdim:vdim)
+    integer :: padding
+    real(kind=8) :: x(-N-1:N+1)
+    real(kind=8) :: v(0:vdim)
     complex(kind=8) :: fsk_wk(-M:M, 0:N)
-    complex(kind=8) :: fvx_wk(-vdim:vdim-1, -N-1:N)
-    complex(kind=8) :: f(-vdim:vdim, -N-1:N+1)
+    complex(kind=8), allocatable :: fvx_wk(:, :)
+    complex(kind=8), allocatable  :: f(:, :)
     real(kind=8) :: f_real(-M:M, 0:N)
     real(kind=8) :: f_imag(-M:M, 0:N)
-    complex(kind=8) :: f1(-vdim:vdim, -N-1:N+1)
+    complex(kind=8), allocatable :: f1(:, :)
     real(kind=8) :: f1_real(-M:M, 0:N)
     real(kind=8) :: f1_imag(-M:M, 0:N)
-    complex(kind=8) :: f2(-vdim:vdim, -N-1:N+1)
+    complex(kind=8), allocatable :: f2(:, :)
     real(kind=8) :: f2_real(-M:M, 0:N)
     real(kind=8) :: f2_imag(-M:M, 0:N)
-    complex(kind=8) :: f3(-vdim:vdim, -N-1:N+1)
+    complex(kind=8), allocatable :: f3(:, :)
     real(kind=8) :: f3_real(-M:M, 0:N)
     real(kind=8) :: f3_imag(-M:M, 0:N)
     integer :: i, p, q
-    integer :: error
+    integer :: error = 0
     real(kind=8) :: dx, dv, ds_eq
+    integer :: nvlres, nvhres
     !FFTW3 parameters
     integer(kind=8) :: plan
     !PSPLINE parameters (r8genxpkg)
@@ -195,23 +200,58 @@ contains
     integer :: ier = 1
     !PSPLINE parameters (r8cspline)
     real(kind=8) :: fspl(4, -M:M)
-    integer :: ibcxmin = 3
-    integer :: ibcxmax = 3
-    real(kind=8) :: bcxmin = 0.0D0
-    real(kind=8) :: bcxmax = 0.0D0
+    integer :: ibcxmin = 0
+    integer :: ibcxmax = 0
+    real(kind=8) :: bcxmin 
+    real(kind=8) :: bcxmax 
     real(kind=8) :: wk(2*M+1)
     integer :: ilinx = 1
     ds_eq = s(M)/M
     forall(i=-M:M) s_eq(i) = i*ds_eq
     dx = pi/(N+1)
-    dv = pi/(ds_eq*vdim) 
+    dv = (vhres-vlres)/vdim
+    padding = nint(pi/(ds_eq*dv))
+    if (padding < M) then
+       write(*,*) "vdim > ", (vhres-vlres)*s(M)/pi
+       stop
+    end if
     forall(i=-N-1:N+1) x(i) = i*dx
-    forall(i=-vdim:vdim) v(i) = i*dv
+    nvlres = nint(vlres/dv) 
+    nvhres = vdim+nvlres
+    forall(i=0:vdim) v(i) = vlres+i*dv
+    allocate(fvx_wk(-padding:padding-1, -N-1:N), stat=error)
+    if (error.ne.0) then
+       write(*,*) "error: could not allocate memory for fvx_wk in TAECH_LIB.IFInt2D"
+       stop
+    end if
+    allocate(f(-padding:padding, -N-1:N+1), stat=error)
+    if (error.ne.0) then
+       write(*,*) "error: could not allocate memory for f in TAECH_LIB.IFInt2D"
+       stop
+    end if
+    allocate(f1(-padding:padding, -N-1:N+1), stat=error)
+    if (error.ne.0) then
+       write(*,*) "error: could not allocate memory for f1 in TAECH_LIB.IFInt2D"
+       stop
+    end if
+    allocate(f2(-padding:padding, -N-1:N+1), stat=error)
+    if (error.ne.0) then
+       write(*,*) "error: could not allocate memory for f2 in TAECH_LIB.IFInt2D"
+       stop
+    end if
+    allocate(f3(-padding:padding, -N-1:N+1), stat=error)
+    if (error.ne.0) then
+       write(*,*) "error: could not allocate memory for f3 in TAECH_LIB.IFInt2D"
+       stop
+    end if
     call r8genxpkg(2*M+1, s_eq, xpkg, iper, imsg, itol, ztol, ialg, ier)
     if (ier .ne. 0) then
        write(*,*) "error: TAECH_LIB.IFInt2D.r8genxpkg"
        stop
     end if
+    !$OMP PARALLEL DO DEFAULT(SHARED) &
+    !$OMP PRIVATE(fspl, wk) &
+    !$OMP FIRSTPRIVATE(ier)
     do p = 0, N
        ! nonuniform s grid converts to uniform s grid
        call conv_fgrid(fsk_wk(-M:M,p), s_eq(-M:M), M, fsk(-M:M,p), s(-M:M), M)
@@ -235,6 +275,7 @@ contains
        f2_imag(-M:M, p) = fspl(3, -M:M)
        f3_imag(-M:M, p) = fspl(4, -M:M)
     end do
+    !$OMP END PARALLEL DO
     f = (0.0D0, 0.0D0)
     f1 = (0.0D0, 0.0D0)
     f2 = (0.0D0, 0.0D0)
@@ -248,77 +289,139 @@ contains
     f3(-M:M, 0:N) = cmplx(f3_real(-M:M, 0:N), f3_imag(-M:M,0:N), kind=8)
     f3(-M:M, -1:-N:-1) = -conjg(f3(M:-M:-1, 1:N))
     ! f fftshift 
-    forall(p=-vdim:-1, q=-N-1:-1) fvx_wk(p,q) = f(-p-vdim, q+N+1)
-    forall(p=-vdim:-1, q=0:N)  fvx_wk(p,q) = f(-p-vdim, q-N-1)
-    forall(p=0:vdim-1, q=-N-1:-1)  fvx_wk(p,q) = f(-p+vdim, q+N+1)
-    forall(p=0:vdim-1, q=0:N)   fvx_wk(p,q) = f(-p+vdim, q-N-1)
+    forall(p=-padding:-1, q=-N-1:-1) fvx_wk(p,q) = f(-p-padding, q+N+1)
+    forall(p=-padding:-1, q=0:N)  fvx_wk(p,q) = f(-p-padding, q-N-1)
+    forall(p=0:padding-1, q=-N-1:-1)  fvx_wk(p,q) = f(-p+padding, q+N+1)
+    forall(p=0:padding-1, q=0:N)   fvx_wk(p,q) = f(-p+padding, q-N-1)
     !2D IFFT on dist matrix
-    call dfftw_plan_dft_2d(plan, 2*vdim, 2*N+2, fvx_wk, fvx_wk, FFTW_BACKWARD, FFTW_ESTIMATE)
+    call dfftw_plan_dft_2d(plan, 2*padding, 2*N+2, fvx_wk, fvx_wk, FFTW_BACKWARD, FFTW_ESTIMATE)
     call dfftw_execute_dft(plan, fvx_wk, fvx_wk)
     ! f fftshift again
-    forall(p=-vdim:-1, q=-N-1:-1) f(p,q) = fvx_wk(p+vdim, q+N+1)
-    forall(p=-vdim:-1, q=0:N+1)  f(p,q) = fvx_wk(p+vdim, q-N-1)
-    forall(p=0:vdim, q=-N-1:-1)  f(p,q) = fvx_wk(p-vdim, q+N+1)
-    forall(p=0:vdim, q=0:N+1)   f(p,q) = fvx_wk(p-vdim, q-N-1)
+    forall(p=-padding:-1, q=-N-1:-1) f(p,q) = fvx_wk(p+padding, q+N+1)
+    forall(p=-padding:-1, q=0:N+1)  f(p,q) = fvx_wk(p+padding, q-N-1)
+    forall(p=0:padding, q=-N-1:-1)  f(p,q) = fvx_wk(p-padding, q+N+1)
+    forall(p=0:padding, q=0:N+1)   f(p,q) = fvx_wk(p-padding, q-N-1)
     ! f1 fftshift 
-    forall(p=-vdim:-1, q=-N-1:-1) fvx_wk(p,q) = f1(-p-vdim, q+N+1)
-    forall(p=-vdim:-1, q=0:N)  fvx_wk(p,q) = f1(-p-vdim, q-N-1)
-    forall(p=0:vdim-1, q=-N-1:-1)  fvx_wk(p,q) = f1(-p+vdim, q+N+1)
-    forall(p=0:vdim-1, q=0:N)   fvx_wk(p,q) = f1(-p+vdim, q-N-1)
+    forall(p=-padding:-1, q=-N-1:-1) fvx_wk(p,q) = f1(-p-padding, q+N+1)
+    forall(p=-padding:-1, q=0:N)  fvx_wk(p,q) = f1(-p-padding, q-N-1)
+    forall(p=0:padding-1, q=-N-1:-1)  fvx_wk(p,q) = f1(-p+padding, q+N+1)
+    forall(p=0:padding-1, q=0:N)   fvx_wk(p,q) = f1(-p+padding, q-N-1)
     !2D IFFT on dist matrix
     call dfftw_execute_dft(plan, fvx_wk, fvx_wk)
     ! f1 fftshift again
-    forall(p=-vdim:-1, q=-N-1:-1) f1(p,q) = fvx_wk(p+vdim, q+N+1)
-    forall(p=-vdim:-1, q=0:N+1)  f1(p,q) = fvx_wk(p+vdim, q-N-1)
-    forall(p=0:vdim, q=-N-1:-1)  f1(p,q) = fvx_wk(p-vdim, q+N+1)
-    forall(p=0:vdim, q=0:N+1)   f1(p,q) = fvx_wk(p-vdim, q-N-1)
+    forall(p=-padding:-1, q=-N-1:-1) f1(p,q) = fvx_wk(p+padding, q+N+1)
+    forall(p=-padding:-1, q=0:N+1)  f1(p,q) = fvx_wk(p+padding, q-N-1)
+    forall(p=0:padding, q=-N-1:-1)  f1(p,q) = fvx_wk(p-padding, q+N+1)
+    forall(p=0:padding, q=0:N+1)   f1(p,q) = fvx_wk(p-padding, q-N-1)
     ! f2 fftshift 
-    forall(p=-vdim:-1, q=-N-1:-1) fvx_wk(p,q) = f2(-p-vdim, q+N+1)
-    forall(p=-vdim:-1, q=0:N)  fvx_wk(p,q) = f2(-p-vdim, q-N-1)
-    forall(p=0:vdim-1, q=-N-1:-1)  fvx_wk(p,q) = f2(-p+vdim, q+N+1)
-    forall(p=0:vdim-1, q=0:N)   fvx_wk(p,q) = f2(-p+vdim, q-N-1)
+    forall(p=-padding:-1, q=-N-1:-1) fvx_wk(p,q) = f2(-p-padding, q+N+1)
+    forall(p=-padding:-1, q=0:N)  fvx_wk(p,q) = f2(-p-padding, q-N-1)
+    forall(p=0:padding-1, q=-N-1:-1)  fvx_wk(p,q) = f2(-p+padding, q+N+1)
+    forall(p=0:padding-1, q=0:N)   fvx_wk(p,q) = f2(-p+padding, q-N-1)
     !2D IFFT on dist matrix
     call dfftw_execute_dft(plan, fvx_wk, fvx_wk)
     ! f2 fftshift again
-    forall(p=-vdim:-1, q=-N-1:-1) f2(p,q) = fvx_wk(p+vdim, q+N+1)
-    forall(p=-vdim:-1, q=0:N+1)  f2(p,q) = fvx_wk(p+vdim, q-N-1)
-    forall(p=0:vdim, q=-N-1:-1)  f2(p,q) = fvx_wk(p-vdim, q+N+1)
-    forall(p=0:vdim, q=0:N+1)   f2(p,q) = fvx_wk(p-vdim, q-N-1)
+    forall(p=-padding:-1, q=-N-1:-1) f2(p,q) = fvx_wk(p+padding, q+N+1)
+    forall(p=-padding:-1, q=0:N+1)  f2(p,q) = fvx_wk(p+padding, q-N-1)
+    forall(p=0:padding, q=-N-1:-1)  f2(p,q) = fvx_wk(p-padding, q+N+1)
+    forall(p=0:padding, q=0:N+1)   f2(p,q) = fvx_wk(p-padding, q-N-1)
     ! f3 fftshift 
-    forall(p=-vdim:-1, q=-N-1:-1) fvx_wk(p,q) = f3(-p-vdim, q+N+1)
-    forall(p=-vdim:-1, q=0:N)  fvx_wk(p,q) = f3(-p-vdim, q-N-1)
-    forall(p=0:vdim-1, q=-N-1:-1)  fvx_wk(p,q) = f3(-p+vdim, q+N+1)
-    forall(p=0:vdim-1, q=0:N)   fvx_wk(p,q) = f3(-p+vdim, q-N-1)
+    forall(p=-padding:-1, q=-N-1:-1) fvx_wk(p,q) = f3(-p-padding, q+N+1)
+    forall(p=-padding:-1, q=0:N)  fvx_wk(p,q) = f3(-p-padding, q-N-1)
+    forall(p=0:padding-1, q=-N-1:-1)  fvx_wk(p,q) = f3(-p+padding, q+N+1)
+    forall(p=0:padding-1, q=0:N)   fvx_wk(p,q) = f3(-p+padding, q-N-1)
     !2D IFFT on dist matrix
     call dfftw_execute_dft(plan, fvx_wk, fvx_wk)
     ! f3 fftshift again
-    forall(p=-vdim:-1, q=-N-1:-1) f3(p,q) = fvx_wk(p+vdim, q+N+1)
-    forall(p=-vdim:-1, q=0:N+1)  f3(p,q) = fvx_wk(p+vdim, q-N-1)
-    forall(p=0:vdim, q=-N-1:-1)  f3(p,q) = fvx_wk(p-vdim, q+N+1)
-    forall(p=0:vdim, q=0:N+1)   f3(p,q) = fvx_wk(p-vdim, q-N-1)
+    forall(p=-padding:-1, q=-N-1:-1) f3(p,q) = fvx_wk(p+padding, q+N+1)
+    forall(p=-padding:-1, q=0:N+1)  f3(p,q) = fvx_wk(p+padding, q-N-1)
+    forall(p=0:padding, q=-N-1:-1)  f3(p,q) = fvx_wk(p-padding, q+N+1)
+    forall(p=0:padding, q=0:N+1)   f3(p,q) = fvx_wk(p-padding, q-N-1)
     call dfftw_destroy_plan(plan)
-    forall(p=-vdim:-1, q=-N-1:N+1) fvx(p,q) = real(-imagj*(1.0-exp(-imagj*v(p)*ds_eq))/v(p)*f(p,q) &
-         + (exp(-imagj*v(p)*ds_eq)-1.0+imagj*v(p)*ds_eq*exp(-imagj*v(p)*ds_eq))/v(p)**2*f1(p,q) &
-         + (-2.0*imagj*exp(-imagj*v(p)*ds_eq)+2.0*imagj &
-         + 2.0*v(p)*ds_eq*exp(-imagj*v(p)*ds_eq)+imagj*v(p)**2*ds_eq**2*exp(-imagj*v(p)*ds_eq)) &
-         / v(p)**3*f2(p,q) &
-         + (-6.0*exp(-imagj*v(p)*ds_eq)+6.0-6.0*imagj*v(p)*ds_eq*exp(-imagj*v(p)*ds_eq) &
-         + 3.0*v(p)**2*ds_eq**2*exp(-imagj*v(p)*ds_eq)+imagj*v(p)**3*ds_eq**3*exp(-imagj*v(p)*ds_eq)) &
-         / v(p)**4*f3(p,q))
-    forall(p=1:vdim, q=-N-1:N+1) fvx(p,q) = real(-imagj*(1.0-exp(-imagj*v(p)*ds_eq))/v(p)*f(p,q) &
-       + (exp(-imagj*v(p)*ds_eq)-1.0+imagj*v(p)*ds_eq*exp(-imagj*v(p)*ds_eq))/v(p)**2*f1(p,q) &
-       + (-2.0*imagj*exp(-imagj*v(p)*ds_eq)+2.0*imagj &
-       + 2.0*v(p)*ds_eq*exp(-imagj*v(p)*ds_eq)+imagj*v(p)**2*ds_eq**2*exp(-imagj*v(p)*ds_eq)) &
-       / v(p)**3*f2(p,q) &
-       + (-6.0*exp(-imagj*v(p)*ds_eq)+6.0-6.0*imagj*v(p)*ds_eq*exp(-imagj*v(p)*ds_eq) &
-       + 3.0*v(p)**2*ds_eq**2*exp(-imagj*v(p)*ds_eq)+imagj*v(p)**3*ds_eq**3*exp(-imagj*v(p)*ds_eq)) &
-       / v(p)**4*f3(p,q))
-    forall(q=-N-1:N+1) fvx(0,q) = real(ds_eq*f(0,q)+ds_eq**2/2.0*f1(0,q) &
-         + ds_eq**3/3.0*f2(0,q)+ds_eq**4/4.0*f3(0,q))
+    do p = nvlres, nvhres
+       if (p == 0) then
+          forall(q=-N-1:N+1) fvx(p-nvlres,q) = real(ds_eq*f(0,q)+ds_eq**2/2.0*f1(0,q) &
+               + ds_eq**3/3.0*f2(0,q)+ds_eq**4/4.0*f3(0,q))
+       else
+          forall(q=-N-1:N+1) fvx(p-nvlres,q) = real(-imagj*(1.0D0-exp(-imagj*v(p-nvlres)*ds_eq)) &
+               / v(p-nvlres)*f(p,q)+(exp(-imagj*v(p-nvlres)*ds_eq)-1.0D0 &
+               + imagj*v(p-nvlres)*ds_eq*exp(-imagj*v(p-nvlres)*ds_eq))/v(p-nvlres)**2*f1(p,q) &
+               + (-2.0D0*imagj*exp(-imagj*v(p-nvlres)*ds_eq)+2.0D0*imagj &
+               + 2.0D0*v(p-nvlres)*ds_eq*exp(-imagj*v(p-nvlres)*ds_eq) &
+               + imagj*v(p-nvlres)**2*ds_eq**2*exp(-imagj*v(p-nvlres)*ds_eq)) &
+               / v(p-nvlres)**3*f2(p,q) &
+               + (-6.0D0*exp(-imagj*v(p-nvlres)*ds_eq)+6.0D0 &
+               - 6.0D0*imagj*v(p-nvlres)*ds_eq*exp(-imagj*v(p-nvlres)*ds_eq) &
+               + 3.0D0*v(p-nvlres)**2*ds_eq**2*exp(-imagj*v(p-nvlres)*ds_eq) &
+               + imagj*v(p-nvlres)**3*ds_eq**3*exp(-imagj*v(p-nvlres)*ds_eq)) &
+               / v(p-nvlres)**4*f3(p,q)) 
+       end if
+    end do
+    deallocate(fvx_wk, stat=error)
+    if (error.ne.0) then
+       write(*,*) "error: could not deallocate memory for fvx_wk in TAECH_LIB.IFInt2D"
+       stop
+    end if
+    deallocate(f, stat=error)
+    if (error.ne.0) then
+       write(*,*) "error: could not deallocate memory for f in TAECH_LIB.IFInt2D"
+       stop
+    end if
+    deallocate(f1, stat=error)
+    if (error.ne.0) then
+       write(*,*) "error: could not deallocate memory for f1 in TAECH_LIB.IFInt2D"
+       stop
+    end if
+    deallocate(f2, stat=error)
+    if (error.ne.0) then
+       write(*,*) "error: could not deallocate memory for f2 in TAECH_LIB.IFInt2D"
+       stop
+    end if
+    deallocate(f3, stat=error)
+    if (error.ne.0) then
+       write(*,*) "error: could not deallocate memory for f3 in TAECH_LIB.IFInt2D"
+       stop
+    end if
     return
   end subroutine IFInt2D
 
 
+  subroutine visualize(fvx, vlres, vhres, vdim, fbnd, fsk, M, N, nt, s) 
+    implicit none
+    integer, intent(in) :: M, N
+    integer, intent(in) :: vdim, nt
+    real(kind=8), intent(in) :: vlres, vhres
+    real(kind=8), intent(in) :: s(-M:M)
+    complex(kind=8), intent(in) :: fsk(-M:M, 0:N)
+    complex(kind=8), intent(in) :: fbnd(1:N, 0:nt)
+    real(kind=8), intent(out) :: fvx(0:vdim, -N-1:N+1)
+    real(kind=8) :: fvx_wk(0:vdim,-N-1:N+1)
+    complex(kind=8) :: fbnd_wk(1:N, 0:nt)
+    real(kind=8) :: v(0:vdim), x(-N-1:N+1)
+    real(kind=8) :: dv, dx
+    integer :: i, j, p, q
+    integer :: nvlres, nvhres
+    dx = pi/(N+1)
+    forall(i=-N-1:N+1) x(i) = i*dx
+    dv = (vhres-vlres)/vdim
+    nvlres = nint(vlres/dv) 
+    nvhres = vdim+nvlres
+    forall(i=0:vdim) v(i) = nvlres+i*dv
+    call IFInt2D(fvx_wk, vlres, vhres, vdim, fsk, M, N, s)
+    fvx = fvx_wk
+    !do j = -N-1, N+1
+    !   do i = nvlres, nvhres
+    !      forall(p=1:N, q=0:nt) fbnd_wk(p,q) = exp(imagj*p*(x(j)-v(i-nvlres)*nt*dt)) &
+    !           * p*exp(imagj*p*v(i-nvlres)*q*dt)*fbnd(p,q)
+    !      fvx_wk(i-nvlres, j) = 2.0D0*real(exp(-imagj*s(M)*v(i-nvlres)) &
+    !           * sum(dt*(sum(fbnd, dim=2)-0.5D0*(fbnd(:,0)+fbnd(:,nt))), dim=1))
+    !   end do
+    !end do
+    !fvx = fvx + fvx_wk
+    return
+  end subroutine visualize
+
+  
   subroutine interpolate_Z(finp, sgrid, nsgrid, fs, s, M)
     implicit none
     integer, intent(in) :: nsgrid, M
@@ -579,10 +682,10 @@ contains
     integer :: ier = 1
     !(r8cspline)
     real(kind=8) :: fspl(4,-M0:M0)
-    integer :: ibcxmin = 3
-    integer :: ibcxmax = 3
-    real(kind=8) :: bcxmin = 0.0D0
-    real(kind=8) :: bcxmax = 0.0D0
+    integer :: ibcxmin = 0
+    integer :: ibcxmax = 0
+    real(kind=8) :: bcxmin 
+    real(kind=8) :: bcxmax 
     real(kind=8) :: wk(2*M0+1)
     integer :: ilinx = 2
     !(r8spvec)
