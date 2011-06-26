@@ -136,7 +136,7 @@ contains
     integer :: i
     dv = pi/s(M)
     forall(i=-M:M) v(i) = i*dv
-    res_v0 = (resonance_bot+resonance_top)/2.0D0 !resonant_velocity(fs0, M, s)  
+    res_v0 = resonant_velocity(fs0, M, s)  
     res_dv = (resonance_top-resonance_bot)/res_size
     forall(i=0:res_size) res_v(i) = resonance_bot+i*res_dv
     call IFFT1D(fv0, M, fs0, s)
@@ -146,9 +146,10 @@ contains
     resonant_filter = -( 2.0D0*pi*(resonance_top-res_v0)*res_fv1(res_size) &
                       - 2.0D0*pi*(resonance_bot-res_v0)*res_fv1(0) &
                       - 2.0D0*pi*(sum(res_fv1)-0.5D0*(res_fv1(0)+res_fv1(res_size)))*res_dv) &
-                    / ( 2.0D0*pi*(resonance_top-res_v0)*res_fv0(res_size) &
+                      / (2.0D0*pi*(resonance_top-res_v0)*res_fv0(res_size) &
                       - 2.0D0*pi*(resonance_bot-res_v0)*res_fv0(0) &
-                      - 2.0D0*pi*(sum(res_fv0)-0.5D0*(res_fv0(0)+res_fv0(res_size)))*res_dv)
+                      - 2.0D0*pi*(sum(res_fv0)-0.5D0*(res_fv0(0)+res_fv0(res_size)))*res_dv &
+                      + pi*((resonance_top-res_v0)**2-(resonance_bot-res_v0)**2))
     return
   end function resonant_filter
 
@@ -194,7 +195,6 @@ contains
     chirp_freq = res_freq(maxloc(res_energy,1)-1)
     return
   end subroutine chirp
-
 end module TAECH_TRACK
 
 
