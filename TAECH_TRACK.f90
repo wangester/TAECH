@@ -151,9 +151,10 @@ contains
     resonant_filter = -((hres-res_v0)*res_fv1(res_size) &
                       - (lres-res_v0)*res_fv1(0) &
                       - (sum(res_fv1)-0.5D0*(res_fv1(0)+res_fv1(res_size)))*res_dv) &
-                    / ( (hres-res_v0)*res_fv0(res_size) &
+                      / ((hres-res_v0)*res_fv0(res_size) &
                       - (lres-res_v0)*res_fv0(0) &
-                      - (sum(res_fv0)-0.5D0*(res_fv0(0)+res_fv0(res_size)))*res_dv)
+                      - (sum(res_fv0)-0.5D0*(res_fv0(0)+res_fv0(res_size)))*res_dv &
+                      + 0.5D0*((hres-res_v0)**2-(lres-res_v0)**2))
     return
   end function resonant_filter
 
