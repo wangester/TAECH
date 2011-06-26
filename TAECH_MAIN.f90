@@ -35,7 +35,7 @@ contains
   subroutine initialize()
     implicit none
     integer :: error = 0
-    integer :: i
+    integer :: i, p, q
     elapsed = OMP_get_wtime()
     call load_cfg('parameters.cfg')
     allocate(t(0:tend), stat=error)
@@ -178,15 +178,46 @@ contains
     real(kind=8) :: bnd0(-modes:modes), bnd1(-modes:modes)
     real(kind=8) :: damping0(-modes:modes), damping1(-modes:modes)
     real(kind=8) :: sft(-modes:modes)
+    complex(kind=8) :: spfminus(-M:M, -modes-1:modes+1)
+    complex(kind=8) :: spf0(-M:M, -modes-1:modes+1)
+    complex(kind=8) :: spfplus(-M:M, -modes-1:modes+1)
+    real(kind=8) :: incx
     integer :: p, q
     is_locked = .False.
+    !forall(p=-edge:-1) fsk(p,0) = 2.0D0*imagj*sin(pi*s(p)/ds) &
+    !                            * (1.0D0-cos(pi*s(p)/ds))/(pi*s(p)**2)
+    !forall(p=1:edge) fsk(p,0) = 2.0D0*imagj*sin(pi*s(p)/ds) &
+    !                          * (1.0D0-cos(pi*s(p)/ds))/(pi*s(p)**2) 
+    forall(p=-M:-1) fsk(p,0) = imagj*(ds*sin(pi*s(p)/ds)-s(edge)/edge*sin(pi*s(p)*edge/s(edge))) &
+                                / (pi*s(p)**2*(ds-s(edge)/edge))
+    forall(p=1:M) fsk(p,0) = imagj*(ds*sin(pi*s(p)/ds)-s(edge)/edge*sin(pi*s(p)*edge/s(edge))) &
+                                / (pi*s(p)**2*(ds-s(edge)/edge))
     res_bound(1) = resonance_bot
     res_bound(2) = resonance_top
     fcorr = (0.0D0, 0.0D0)
+    ! calculate the distribution at old time step along the characteristic line 
+    spf0(-M:M, 0:modes) = fsk(-M:M, 0:modes)
+    spf0(-M:M, -modes:-1) = conjg(fsk(M:-M:-1, modes:1:-1))
+    spf0(-M:M, -modes-1) = (0.0D0, 0.0D0)
+    spf0(-M:M, modes+1) = (0.0D0, 0.0D0)
+    spfminus(-M:M, -modes-1:modes+1) = spf0(-M:M, -modes-1:modes+1)
+    spfplus(-M:M, -modes-1:modes+1) = spf0(-M:M, -modes-1:modes+1)
+    !$OMP PARALLEL DO DEFAULT(SHARED) &
+    !$OMP PRIVATE(incx)
+    do q = -modes, modes
+       incx = -q*dt
+       call fspline(spfminus(-M:M, q-1), s, M, incx)
+       call fspline(spf0(-M:M, q), s, M, incx)
+       call fspline(spfplus(-M:M, q+1), s, M, incx)
+    end do
+    !$OMP END PARALLEL DO
     sft = 0.0D0
     call set_damping(damping0, modes, sft, is_damping)
-    wave_ampl(1) = 1.0D0/(Deltam-0.5D0*dt+imagj*(pi*eta/(1.0D0+0.5D0*dt*damping0(1))-1.0D0)) &
+    wave_ampl(1) = 1.0D0/(Deltam-0.5D0*dt-imagj) &
          * ((1.0D0+dt/(2.0D0*(Deltam-imagj)))*deltap*kernel(1)*exp(-eps*t(1)))
+    ! solve the vlasov equation 
+    !$OMP PARALLEL DO DEFAULT(SHARED) &
+    !$OMP PRIVATE(q, sft, bnd0, bnd1, damping0, damping1, sub_diag, diag, sup_diag, rhs)
     do p = 0, M
        forall(q=-modes:modes) sft(q) = s(p)
        call set_boundary(bnd0, modes, sft)
@@ -195,22 +226,25 @@ contains
        call set_boundary(bnd1, modes, sft)
        call set_damping(damping1, modes, sft, is_damping)
        forall(q=-modes:modes) sub_diag(q) = imagj*0.25D0*dt*s(p)*bnd0(q)*wave_ampl(1)
-       forall(q=-modes:modes) diag(q) = 1.0D0 + 0.5D0*dt*damping0(q)
+       forall(q=-modes:modes) diag(q) = 1.0D0+imagj*0.25D0*dt*s(p)*bnd0(q) &
+            * (wave_ampl(1)*fcorr(2)+conjg(wave_ampl(1))*fcorr(1)) &
+            + 0.5D0*dt*damping0(q)
        forall(q=-modes:modes) sup_diag(q) = imagj*0.25D0*dt*s(p)*bnd0(q)*conjg(wave_ampl(1))
-       forall(q=-modes:modes) rhs(q) = (0.0D0, 0.0D0)
-       if (p > 0 .and. p < ngen) then
-          rhs(1) = rhs(1) + 0.5D0/dt*(s(p)*wave_ampl(0)+(dt-s(p))*wave_ampl(1))
-       elseif (p == 0) then
-          rhs(1) = rhs(1) + 0.25D0*wave_ampl(1)
-          rhs(-1) = rhs(-1) + 0.25D0*conjg(wave_ampl(1))
-       elseif (p == ngen) then 
-          rhs(1) = rhs(1) + 0.25D0*wave_ampl(0)
-       end if
+       forall(q=-modes:modes) rhs(q) = -imagj*0.25D0*dt &
+            * (sft(q)*bnd1(q)*wave_ampl(0)*spfminus(p,q-1) &
+            + s(p)*bnd0(q)*wave_ampl(1)*spf0(p,q-1)) &
+            - 0.5D0*dt*(0.5D0*imagj*sft(q)*bnd1(q) &
+            * (wave_ampl(0)*fcorr(2)+conjg(wave_ampl(0))*fcorr(1)) &
+            + damping1(q)+0.5D0*imagj*s(p)*bnd0(q)*(wave_ampl(1)*fcorr(2) &
+            + conjg(wave_ampl(1))*fcorr(1))+damping0(q))*spf0(p,q) &
+            - imagj*0.25D0*dt*(sft(q)*bnd1(q)*conjg(wave_ampl(0))*spfplus(p,q+1) &
+            + s(p)*bnd0(q)*conjg(wave_ampl(1))*spf0(p,q+1))
        call solve_tridiag(sub_diag(-modes:modes), diag(-modes:modes), &
             sup_diag(-modes:modes), rhs(-modes:modes), deltaf(-modes:modes,p), 2*modes+1)
     end do
-    fsk(0:M, 0:modes) = transpose(deltaf(0:modes, 0:M))+(0.0D0,0.0D0)
-    fsk(-M:-1, 0:modes) = conjg(transpose(deltaf(0:-modes:-1, M:1:-1))+(0.0D0,0.0D0))
+    !$OMP END PARALLEL DO
+    fsk(0:M, 0:modes) = transpose(deltaf(0:modes, 0:M))+spf0(0:M, 0:modes)
+    fsk(-M:-1, 0:modes) = conjg(transpose(deltaf(0:-modes:-1, M:1:-1))+spf0(M:1:-1,0:-modes:-1))
     forall(q=1:modes) fedge(q, 1) = fsk(edge, q)
     return
   end subroutine startup
@@ -220,46 +254,56 @@ contains
     implicit none
     integer, intent(in) :: nt
     integer :: error = 0
-    complex(kind=8) :: fsk_lab(-edge:edge,0:modes)
+    complex(kind=8) :: fsk_wk(-edge:edge,0:modes)
     real(kind=8), allocatable :: fvx_resonance(:,:)
     real(kind=8), allocatable :: fvx_lab_resonance(:,:)
     complex(kind=8) :: fv_wave(-edge:edge)
     real(kind=8) :: chirp_freq, chirp_ergy
     real(kind=8) :: lres, hres
     integer :: nlres, nhres
-    real(kind=8) :: dv
     integer :: p, q
     if (mod(nt,tsave) == 0) then    
-       lres = res_bound(1)-0.1D0
-       nlres = nint(10*s(M)*lres/pi)
-       hres = res_bound(2)+0.5D0
-       nhres = nint(10*s(M)*hres/pi)
+       lres = resonance_bot-0.2D0
+       nlres = nint(10.0D0*s(M)*lres/pi)
+       hres = resonance_top+0.2D0
+       nhres = nlres+nint(10.0D0*s(M)*(resonance_top-resonance_bot+0.4D0)/pi)
        allocate(fvx_resonance(0:nhres-nlres, -modes-1:modes+1), stat=error)
        if (error.ne.0) then
           write(*,*) "error: could not allocate memory for fvx_resonance in TAECH_MAIN.diagnose"
           stop
        end if
+       forall(p=-edge:edge, q=1:modes) fsk_wk(p,q) = (sin(pi*q/(modes+1)) &
+            / (pi*q/(modes+1)))**5*fsk(p,q)
+       fsk_wk(-edge:edge,0) = fsk(-edge:edge,0)
        call IFInt2D(fvx_resonance(0:nhres-nlres,-modes-1:modes+1), lres, hres, nhres-nlres, &
-            fsk(-edge:edge,0:modes), edge, modes, s(-edge:edge))
+            fsk_wk(-edge:edge,0:modes), edge, modes, s(-edge:edge))
+       forall(p=0:nhres-nlres,q=-modes-1:modes+1) fvx_resonance(p,q)=fvx_resonance(p,q)
        !call visualize(fvx_resonance(0:nhres-nlres,-modes-1:modes+1), lres, hres, nhres-nlres, &
        !     fedge(1:modes,0:nt), fsk(-edge:edge,0:modes), edge, modes, nt, s(-edge:edge))
-       lres = res_bound(1)+vf(nt)-0.1D0
-       nlres = nint(10*s(M)*lres/pi)
-       hres = res_bound(2)+vf(nt)+0.5D0
-       nhres = nint(10*s(M)*hres/pi)
-       dv = (hres-lres)/(nhres-nlres)
+       lres = resonance_bot+vf(nt)-0.2D0
+       nlres = nint(10.0D0*s(M)*lres/pi)
+       hres = resonance_top+vf(nt)+0.2D0
+       nhres = nlres+nint(10.0D0*s(M)*(resonance_top-resonance_bot+0.4D0)/pi)
        allocate(fvx_lab_resonance(0:nhres-nlres, -modes-1:modes+1), stat=error)
        if (error.ne.0) then
           write(*,*) "error: could not allocate memory for fvx_lab_resonance in TAECH_MAIN.diagnose"
           stop
        end if
-       forall(p=-edge:edge, q=0:modes) fsk_lab(p,q) = fsk(p,q)*exp(-imagj*q*xf(nt)+imagj*s(p)*vf(nt))
+       forall(p=-edge:edge, q=0:modes) fsk_wk(p,q) = fsk(p,q)*exp(-imagj*q*xf(nt)+imagj*s(p)*vf(nt))
+       forall(p=-edge:edge, q=1:modes) fsk_wk(p,q) = (sin(pi*q/(modes+1)) &
+            / (pi*q/(modes+1)))**5*fsk_wk(p,q)
+       forall(p=-edge:-1) fsk_wk(p,0) = fsk_wk(p,0)-imagj &
+                                      * (ds*sin(pi*s(p)/ds)-s(edge)/edge*sin(pi*s(p)*edge/s(edge))) &
+                                      / (pi*s(p)**2*(ds-s(edge)/edge))
+       forall(p=1:edge) fsk_wk(p,0) = fsk_wk(p,0)-imagj &
+                                    * (ds*sin(pi*s(p)/ds)-s(edge)/edge*sin(pi*s(p)*edge/s(edge))) &
+                                    / (pi*s(p)**2*(ds-s(edge)/edge))
        call IFInt2D(fvx_lab_resonance(0:nhres-nlres,-modes-1:modes+1), lres, hres, &
-            nhres-nlres, fsk_lab(-edge:edge,0:modes), edge, modes, s(-edge:edge))
+            nhres-nlres, fsk_wk(-edge:edge,0:modes), edge, modes, s(-edge:edge))
+       forall(p=0:nhres-nlres,q=-modes-1:modes+1) fvx_lab_resonance(p,q)=fvx_lab_resonance(p,q) &
+            + lres+p*(hres-lres)/(nhres-nlres)
        !call visualize(fvx_lab_resonance(0:nhres-nlres,-modes-1:modes+1), lres, hres, nhres-nlres, &
        !     fedge(1:modes,0:nt), fsk_lab(-edge:edge,0:modes), edge, modes, nt, s(-edge:edge))
-       forall(p=0:nhres-nlres,q=-modes-1:modes+1) fvx_lab_resonance(p,q) = fvx_lab_resonance(p,q) &
-            + lres+p*dv
        call save_output('./results/fvx_resonance.dat', fvx_resonance, nhres-nlres+1, 2*modes+3, .True.)
        call save_output('./results/fvx_lab_resonance.dat', & 
             fvx_lab_resonance, nhres-nlres+1, 2*modes+3, .True.)
@@ -274,8 +318,6 @@ contains
           stop
        end if
        if (is_debug) then
-          call IFFT1D(fv_wave(-edge:edge), edge, fsk(-edge:edge,0), s(-edge:edge))         
-          call save_output('./diagnostics/fv_wave.dat',fv_wave, 2*edge+1, .True. )
           call save_output('./diagnostics/wave_ampl.dat', wave_ampl(0:nt), nt+1, .False.)
           call save_output('./diagnostics/chirp_freq.dat', vf(0:nt), nt+1, .False.)
           call save_output('./diagnostics/fsk_wave.dat', fsk, 2*M+1, modes+1, .True.)
@@ -287,11 +329,11 @@ contains
             nint(100/dt), res_bound(1), res_bound(2))
        write(*,*) chirp_freq, chirp_ergy
        write(*,*) resonant_density(fsk(-edge:edge,0), edge, s(-edge:edge), &
-            res_bound(1), res_bound(2))
+            vf(nt), res_bound(1), res_bound(2))
        write(*,*) resonant_position(fsk(-edge:edge,0:modes), &
-            edge, modes, s(-edge:edge), res_bound(1), res_bound(2))
+            edge, modes, s(-edge:edge), vf(nt), res_bound(1), res_bound(2))
        write(*,*) resonant_velocity(fsk(-edge:edge,0), edge, &
-            s(-edge:edge), res_bound(1), res_bound(2))
+            s(-edge:edge), vf(nt), res_bound(1), res_bound(2))
     end if
     return
   end subroutine diagnose
@@ -352,28 +394,26 @@ contains
     twin = nint(100/dt)
     if (.not.is_locked .and. nt>=twin .and. &
          is_resonant(wave_ampl(nt-twin:nt), twin, fsk(-edge:edge,0), &
-         edge, s(-edge:edge)))  then
+         edge, s(-edge:edge), vf(nt)))  then
        is_locked = .True.
     end if
     if (is_locked .and. nt>=nint(4000/dt) .and. &
          (vf(nt)<-pi/dt .or. resonant_density(fsk(-edge:edge,0), edge, s(-edge:edge), &
-         res_bound(1), res_bound(2))<1.5D0*pi*(resonance_top-resonance_bot)**2))  then
+         vf(nt), res_bound(1), res_bound(2))<1.5D0*pi*(resonance_top-resonance_bot)**2))  then
        is_locked = .False.
     end if
     if (is_locked) then
-       call chirp(chirp_freq, chirp_ergy, wave_ampl(nt-nint(100/dt):nt), &
-            nint(100/dt), res_bound(1), res_bound(2))
-       do while (chirp_ergy<0.1D0)
-          call chirp(chirp_freq, chirp_ergy, wave_ampl(nt-nint(100/dt):nt), &
-               nint(100/dt), res_bound(1), res_bound(2))
-          res_bound(2) = res_bound(2)+0.01D0
-       end do
-       !res_bound(1) = 0.5D0*(resonance_bot-resonance_top) &
-       !     + resonant_velocity(fsk(-edge:edge,0), &
-       !     edge, s(-edge:edge), res_bound(1), res_bound(2))
-       !res_bound(2) = res_bound(1)+resonance_top-resonance_bot
+       !call chirp(chirp_freq, chirp_ergy, wave_ampl(nt-nint(100/dt):nt), &
+       !     nint(100/dt), res_bound(1), res_bound(2))
+       !do while (chirp_ergy<0.05D0)
+       !   call chirp(chirp_freq, chirp_ergy, wave_ampl(nt-nint(100/dt):nt), &
+       !        nint(100/dt), res_bound(1), res_bound(2))
+       !   res_bound(2) = res_bound(2)+0.01D0
+       !end do
+       res_bound(1) = resonance_bot
+       res_bound(2) = resonance_top
        fcorr(1) = resonant_filter(fsk(-edge:edge,0), fsk(-edge:edge,1), edge, &
-            s(-edge:edge), res_bound(1), res_bound(2))
+            s(-edge:edge), vf(nt), res_bound(1), res_bound(2))
        fcorr(2) = conjg(fcorr(1))
        vf(nt+1) = vf(nt)+0.5D0*dt*real(wave_ampl(nt)*fcorr(2)+conjg(wave_ampl(nt))*fcorr(1))
        xf(nt+1) = xf(nt)+0.5D0*dt*(vf(nt)+vf(nt+1)) 
@@ -435,8 +475,7 @@ contains
             * conjg(wave_ampl(nt))*spfplus(0,q+1))
     end do
     forall(q=0:modes) fsk(0,q) = deltaf(q,0)+spf0(0,q)
-    wave_ampl(nt+1) = 1.0D0/(Deltam-0.5D0*dt+imagj &
-         * (pi*eta/(1.0D0+0.5D0*dt*damping0(1))-1.0D0)) &
+    wave_ampl(nt+1) = 1.0D0/(Deltam-0.5D0*dt-imagj) &
          * (dt*exp(imagj*xf(nt+1)) &
          * zdotu(nt, wave_ampl(1:nt)*exp(-imagj*xf(1:nt)), 1, &
          kernel(1:nt)*exp(-eps*t(1:nt)), -1) &
@@ -467,14 +506,6 @@ contains
             + conjg(wave_ampl(nt+1))*fcorr(1))+damping0(q))*spf0(p,q) &
             - imagj*0.25D0*dt*(sft(q)*bnd1(q)*conjg(wave_ampl(nt))*spfplus(p,q+1) &
             + s(p)*bnd0(q)*conjg(wave_ampl(nt+1))*spf0(p,q+1))
-       if ( p > 0 .and. p < ngen) then
-          rhs(1) = rhs(1)+0.5D0/dt*(s(p)*wave_ampl(nt)+(dt-s(p))*wave_ampl(nt+1))
-       elseif (p == 0) then
-          rhs(1) = rhs(1) + 0.25D0*wave_ampl(nt+1)
-          rhs(-1) = rhs(-1) + 0.25D0*conjg(wave_ampl(nt+1))
-       elseif (p == ngen) then 
-          rhs(1) = rhs(1) + 0.25D0*wave_ampl(nt)
-       end if
        call solve_tridiag(sub_diag(-modes:modes), diag(-modes:modes), &
             sup_diag(-modes:modes), rhs(-modes:modes), deltaf(-modes:modes,p), 2*modes+1)
     end do
